@@ -45,6 +45,42 @@ async def _stations(client: httpx.AsyncClient) -> list[dict]:
     return payload
 
 
+async def find_station(
+    client: httpx.AsyncClient, query: str, limit: int = 5,
+) -> list[dict[str, Any]]:
+    """Return up to `limit` NS stations matching `query` — exact code, then
+    name exact, prefix, substring. Single-hit `resolve_station` below uses
+    the same matchers but stops at the first hit."""
+    q = query.strip().lower()
+    if not q:
+        return []
+    stations = await _stations(client)
+    matchers = []
+    if 2 <= len(q) <= 6:
+        matchers.append(lambda s: (s.get("code") or "").lower() == q)
+    matchers += [
+        lambda s: (s.get("namen", {}).get("lang") or "").lower() == q,
+        lambda s: (s.get("namen", {}).get("lang") or "").lower().startswith(q),
+        lambda s: q in (s.get("namen", {}).get("lang") or "").lower(),
+    ]
+    matches: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for m in matchers:
+        for s in stations:
+            code = s.get("code")
+            if not code or code in seen or not m(s):
+                continue
+            seen.add(code)
+            matches.append({
+                "code": code,
+                "name": s.get("namen", {}).get("lang"),
+                "country": s.get("land"),
+            })
+            if len(matches) >= limit:
+                return matches
+    return matches
+
+
 async def resolve_station(client: httpx.AsyncClient, query: str) -> dict[str, Any] | None:
     """Resolve free text to NS station record. Returns dict with code + name or None."""
     q = query.strip().lower()

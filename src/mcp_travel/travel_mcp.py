@@ -42,10 +42,18 @@ from mcp_travel.travel_fx import to_gbp as _to_gbp
 from mcp_travel.travel_hotels import search as hotels_search
 from mcp_travel.travel_multi_leg import plan_multi_leg_impl
 from mcp_travel.travel_plan import plan_trip_impl
-from mcp_travel.travel_sncf import SncfError, search_journey as sncf_search
-from mcp_travel.travel_ns import NSError, search_journey as ns_search
-from mcp_travel.travel_sncb import SNCBError, search_journey as sncb_search
-from mcp_travel.travel_db import DBError, search_journey as db_search
+from mcp_travel.travel_sncf import (
+    SncfError, search_journey as sncf_search, find_place as sncf_find_place,
+)
+from mcp_travel.travel_ns import (
+    NSError, search_journey as ns_search, find_station as ns_find_station,
+)
+from mcp_travel.travel_sncb import (
+    SNCBError, search_journey as sncb_search, find_station as sncb_find_station,
+)
+from mcp_travel.travel_db import (
+    DBError, search_journey as db_search, find_station as db_find_station,
+)
 from mcp_travel.travel_trenitalia import (
     TrenitaliaError,
     search_journey as trenitalia_search,
@@ -53,8 +61,12 @@ from mcp_travel.travel_trenitalia import (
 )
 from mcp_travel.travel_renfe import RenfeError, search_journey as renfe_search
 from mcp_travel.travel_austria import AustriaError, search_journey as austria_search
-from mcp_travel.travel_norway import NorwayError, search_journey as norway_search
-from mcp_travel.travel_sweden import SwedenError, search_journey as sweden_search
+from mcp_travel.travel_norway import (
+    NorwayError, search_journey as norway_search, find_stop as norway_find_stop,
+)
+from mcp_travel.travel_sweden import (
+    SwedenError, search_journey as sweden_search, find_station as sweden_find_station,
+)
 from mcp_travel.travel_uber import UberError, price_estimates as uber_prices, time_estimates as uber_times, _deeplink as uber_deeplink
 from mcp_travel.travel_tfl import (
     TflError,
@@ -2259,6 +2271,95 @@ from . import travel_sbb, travel_uk  # noqa: E402
 
 travel_sbb.register(mcp)
 travel_uk.register(mcp)
+
+
+# --- Stage 3b find_station tools (added 2026-05-05) --------------------
+# Six new station-search tools to match the surface UK + CH already had.
+# Each returns up to N candidates; callers can pick by name + coords.
+
+@mcp.tool()
+async def travel_rail_fr_find_station(query: str, limit: int = 5) -> str:
+    """Search French rail stations + places via SNCF Navitia /places.
+
+    Returns stop_areas first (e.g. 'Paris Gare de Lyon' →
+    'stop_area:SNCF:87686006'), with administrative regions / addresses
+    trailing. Coordinates and pre-resolved Navitia IDs short-circuit
+    to a single self-describing entry.
+    """
+    matches = await sncf_find_place(_ctx()["client"], query, limit=limit)
+    return json.dumps({
+        "ok": True, "query": query, "match_count": len(matches), "matches": matches,
+    }, indent=2)
+
+
+@mcp.tool()
+async def travel_rail_nl_find_station(query: str, limit: int = 5) -> str:
+    """Search Dutch (NS) railway stations by name or 2-6 letter code.
+
+    Returns code (e.g. 'ASD' Amsterdam Centraal, 'RTD' Rotterdam Centraal),
+    name, and country. Match order: exact code, exact name, prefix,
+    substring. Backed by NS Reisinformatie API.
+    """
+    matches = await ns_find_station(_ctx()["client"], query, limit=limit)
+    return json.dumps({
+        "ok": True, "query": query, "match_count": len(matches), "matches": matches,
+    }, indent=2)
+
+
+@mcp.tool()
+async def travel_rail_be_find_station(query: str, limit: int = 5) -> str:
+    """Search Belgian (SNCB / NMBS) railway stations via the iRail API.
+
+    Returns station name (English-ish 'standardname' preferred),
+    iRail station ID, and coordinates. Match order: exact name, prefix,
+    substring against both `standardname` and local `name`.
+    """
+    matches = await sncb_find_station(_ctx()["client"], query, limit=limit)
+    return json.dumps({
+        "ok": True, "query": query, "match_count": len(matches), "matches": matches,
+    }, indent=2)
+
+
+@mcp.tool()
+async def travel_rail_de_find_station(query: str, limit: int = 5) -> str:
+    """Search German (DB) rail locations via db-rest /locations.
+
+    Stop-typed entries (real stations) surface first; addresses/POIs
+    trail. Returns the db-rest `id` (use as origin/destination in
+    `travel_rail_de_journey`), name, type, and coordinates.
+    """
+    matches = await db_find_station(_ctx()["client"], query, limit=limit)
+    return json.dumps({
+        "ok": True, "query": query, "match_count": len(matches), "matches": matches,
+    }, indent=2)
+
+
+@mcp.tool()
+async def travel_rail_no_find_station(query: str, limit: int = 5) -> str:
+    """Search Norwegian stops via the Entur geocoder.
+
+    Rail / metro / tram categories surface first; bus stops and other
+    venue types trail. Returns NSR id (e.g. `NSR:StopPlace:337`),
+    label, category list, and coordinates.
+    """
+    matches = await norway_find_stop(_ctx()["client"], query, limit=limit)
+    return json.dumps({
+        "ok": True, "query": query, "match_count": len(matches), "matches": matches,
+    }, indent=2)
+
+
+@mcp.tool()
+async def travel_rail_se_find_station(query: str, limit: int = 5) -> str:
+    """Search Swedish stations via ResRobot /location.name.
+
+    Returns ResRobot `extId` (use as origin/destination in
+    `travel_rail_se_journey`), name, and coordinates. Coordinate-only
+    entries (addresses) are dropped — stops only.
+    """
+    matches = await sweden_find_station(_ctx()["client"], query, limit=limit)
+    return json.dumps({
+        "ok": True, "query": query, "match_count": len(matches), "matches": matches,
+    }, indent=2)
 
 
 # --- Stage 3a deprecation aliases (renamed 2026-05-05) -----------------

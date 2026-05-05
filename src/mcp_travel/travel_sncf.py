@@ -58,6 +58,47 @@ def _fmt_dt(iso: str) -> str:
     return f"{date}T{time}"
 
 
+async def find_place(
+    client: httpx.AsyncClient, query: str, limit: int = 5,
+) -> list[dict[str, Any]]:
+    """Return up to `limit` Navitia /places candidates. stop_area first, then
+    administrative_region / address / poi. Already-resolved IDs/coords short-
+    circuit to a single self-describing entry."""
+    if _looks_like_id(query) or _looks_like_coord(query):
+        return [{"id": query, "name": query, "embedded_type": "raw"}]
+
+    resp = await client.get(
+        f"{NAV_BASE}/places",
+        params=[
+            ("q", query),
+            ("count", str(max(limit, 5))),
+            ("type[]", "stop_area"),
+            ("type[]", "address"),
+            ("type[]", "administrative_region"),
+        ],
+        auth=_auth(),
+        timeout=20.0,
+    )
+    if resp.status_code >= 400:
+        raise SncfError(f"sncf /places {resp.status_code}: {resp.text[:300]}")
+    places = resp.json().get("places", []) or []
+
+    rank = {"stop_area": 0, "administrative_region": 1, "address": 2, "poi": 3}
+    places_sorted = sorted(places, key=lambda p: rank.get(p.get("embedded_type"), 99))
+
+    out: list[dict[str, Any]] = []
+    for p in places_sorted[:limit]:
+        coord = p.get("coord") or {}
+        out.append({
+            "id": p.get("id") or p.get("uri"),
+            "name": p.get("name"),
+            "embedded_type": p.get("embedded_type"),
+            "lat": coord.get("lat"),
+            "lon": coord.get("lon"),
+        })
+    return out
+
+
 async def resolve_place(client: httpx.AsyncClient, query: str) -> dict[str, Any] | None:
     """Resolve free text via Navitia /places. Returns {id, name, embedded_type}."""
     if _looks_like_id(query) or _looks_like_coord(query):

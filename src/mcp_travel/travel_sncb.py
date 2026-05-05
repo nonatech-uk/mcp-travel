@@ -58,6 +58,41 @@ async def _stations(client: httpx.AsyncClient) -> list[dict]:
     return _STATIONS_CACHE
 
 
+async def find_station(
+    client: httpx.AsyncClient, query: str, limit: int = 5,
+) -> list[dict[str, Any]]:
+    """Return up to `limit` iRail stations matching `query`. Match order:
+    exact name (standardname/name), prefix, substring."""
+    q = query.strip().lower()
+    if not q:
+        return []
+    stations = await _stations(client)
+    matchers = []
+    for key in ("standardname", "name"):
+        matchers.append(lambda s, k=key: (s.get(k) or "").lower() == q)
+    for key in ("standardname", "name"):
+        matchers.append(lambda s, k=key: (s.get(k) or "").lower().startswith(q))
+    for key in ("standardname", "name"):
+        matchers.append(lambda s, k=key: q in (s.get(k) or "").lower())
+    matches: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for m in matchers:
+        for s in stations:
+            name = s.get("standardname") or s.get("name") or ""
+            if not name or name in seen or not m(s):
+                continue
+            seen.add(name)
+            matches.append({
+                "name": name,
+                "id": s.get("@id") or s.get("id"),
+                "lat": s.get("locationY"),
+                "lon": s.get("locationX"),
+            })
+            if len(matches) >= limit:
+                return matches
+    return matches
+
+
 async def resolve_station(client: httpx.AsyncClient, query: str) -> str | None:
     """Return iRail station name (e.g. 'Brussels-South') for free text or None."""
     q = query.strip().lower()

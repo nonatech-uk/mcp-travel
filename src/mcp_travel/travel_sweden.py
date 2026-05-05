@@ -36,6 +36,36 @@ def _api_key() -> str:
     return k
 
 
+async def find_station(
+    client: httpx.AsyncClient, query: str, limit: int = 5,
+) -> list[dict[str, Any]]:
+    """Return up to `limit` ResRobot StopLocations for `query`. Coordinate-only
+    (CoordLocation) entries are dropped — they're addresses, not stops."""
+    resp = await client.get(
+        f"{RESROBOT_BASE}/location.name",
+        params={"input": query, "format": "json", "accessId": _api_key()},
+        timeout=20.0,
+    )
+    if resp.status_code >= 400:
+        raise SwedenError(f"resrobot /location.name {resp.status_code}: {resp.text[:300]}")
+    payload = resp.json()
+    items = payload.get("stopLocationOrCoordLocation") or []
+    out: list[dict[str, Any]] = []
+    for it in items:
+        s = it.get("StopLocation")
+        if not s:
+            continue
+        out.append({
+            "id": s.get("extId") or s.get("id"),
+            "name": s.get("name"),
+            "lat": s.get("lat"),
+            "lon": s.get("lon"),
+        })
+        if len(out) >= limit:
+            break
+    return out
+
+
 async def resolve_station(client: httpx.AsyncClient, query: str) -> dict[str, Any] | None:
     """Resolve free-text query to a ResRobot station extId. Prefers rail stations."""
     resp = await client.get(

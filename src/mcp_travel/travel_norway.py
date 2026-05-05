@@ -30,6 +30,38 @@ class NorwayError(RuntimeError):
     pass
 
 
+async def find_stop(
+    client: httpx.AsyncClient, query: str, limit: int = 5,
+) -> list[dict[str, Any]]:
+    """Return up to `limit` Entur stop candidates for `query`. Rail / metro /
+    tram surface first; other categories trail."""
+    resp = await client.get(
+        ENTUR_GEOCODER,
+        params={"text": query, "size": max(limit, 5), "layers": "venue"},
+        headers={"User-Agent": ENTUR_UA, "ET-Client-Name": "nonatech-mcp-travel"},
+        timeout=20.0,
+    )
+    if resp.status_code >= 400:
+        raise NorwayError(f"entur geocoder {resp.status_code}: {resp.text[:300]}")
+    feats = resp.json().get("features") or []
+    rail_like = ("railStation", "onstreetTram", "metroStation")
+
+    def shape(f: dict) -> dict:
+        props = f.get("properties") or {}
+        coord = (f.get("geometry") or {}).get("coordinates") or [None, None]
+        return {
+            "id": props.get("id"),
+            "name": props.get("label"),
+            "category": props.get("category") or [],
+            "lat": coord[1],
+            "lon": coord[0],
+        }
+
+    preferred = [f for f in feats if any(c in rail_like for c in (f.get("properties") or {}).get("category") or [])]
+    rest = [f for f in feats if f not in preferred]
+    return [shape(f) for f in (preferred + rest)[:limit]]
+
+
 async def resolve_stop(client: httpx.AsyncClient, query: str) -> dict[str, Any] | None:
     """Use Entur geocoder to resolve free text → NSR:StopPlace:NNN id."""
     resp = await client.get(

@@ -32,20 +32,46 @@ def _base() -> str:
     return os.environ.get("DB_REST_BASE", DB_BASE_DEFAULT).rstrip("/")
 
 
-async def resolve_station(client: httpx.AsyncClient, query: str) -> dict[str, Any] | None:
-    """Returns top /locations match (preferring 'stop' type) or None."""
+async def _locations(client: httpx.AsyncClient, query: str, results: int) -> list[dict]:
     resp = await client.get(
         f"{_base()}/locations",
-        params={"query": query, "results": 5, "stops": "true", "addresses": "false", "poi": "false"},
+        params={"query": query, "results": results, "stops": "true", "addresses": "false", "poi": "false"},
         headers={"User-Agent": DB_UA},
         timeout=30.0,
     )
     if resp.status_code >= 400:
         raise DBError(f"db-rest /locations {resp.status_code}: {resp.text[:300]}")
-    items = resp.json()
+    return resp.json() or []
+
+
+async def find_station(
+    client: httpx.AsyncClient, query: str, limit: int = 5,
+) -> list[dict[str, Any]]:
+    """Return up to `limit` DB station matches via db-rest /locations.
+    Stop-typed entries surface first; addresses/POIs trail."""
+    items = await _locations(client, query, max(limit, 5))
+    if not items:
+        return []
+    stops = [it for it in items if it.get("type") == "stop"]
+    others = [it for it in items if it.get("type") != "stop"]
+    out: list[dict[str, Any]] = []
+    for it in (stops + others)[:limit]:
+        loc = it.get("location") or {}
+        out.append({
+            "id": it.get("id"),
+            "name": it.get("name"),
+            "type": it.get("type"),
+            "lat": loc.get("latitude"),
+            "lon": loc.get("longitude"),
+        })
+    return out
+
+
+async def resolve_station(client: httpx.AsyncClient, query: str) -> dict[str, Any] | None:
+    """Returns top /locations match (preferring 'stop' type) or None."""
+    items = await _locations(client, query, 5)
     if not items:
         return None
-    # Prefer entries marked as 'stop' (i.e. actual stations)
     stops = [it for it in items if it.get("type") == "stop"]
     pick = stops[0] if stops else items[0]
     return {"id": pick.get("id"), "name": pick.get("name"), "type": pick.get("type")}

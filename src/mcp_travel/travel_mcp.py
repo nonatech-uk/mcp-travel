@@ -38,6 +38,7 @@ from mcp_travel.travel_ferries import (
     FerryError, check as ferry_check, routes_to as ferry_routes_to,
     ROUTES as FERRY_ROUTES,
 )
+from mcp_travel.travel_fx import to_gbp as _to_gbp
 from mcp_travel.travel_hotels import search as hotels_search
 from mcp_travel.travel_multi_leg import plan_multi_leg_impl
 from mcp_travel.travel_plan import plan_trip_impl
@@ -297,11 +298,14 @@ async def _flight_check_impl(
     if duffel_ok:
         offers = duffel_result.get("offers", []) or []
         prices = [o["total_amount"] for o in offers if o.get("total_amount") is not None]
+        duffel_best = min(prices) if prices else None
+        duffel_cur = offers[0].get("total_currency") if offers else None
         duffel_opt.update({
             "offers": offers,
             "offer_count": len(offers),
-            "best_price": min(prices) if prices else None,
-            "currency": offers[0].get("total_currency") if offers else None,
+            "best_price": duffel_best,
+            "currency": duffel_cur,
+            "best_price_gbp": await _to_gbp(duffel_best, duffel_cur, ctx.get("client")),
             "cabin": cabin,
             "live": duffel_result.get("live", False),
             "booking_deeplink": duffel_result.get("booking_deeplink"),
@@ -329,11 +333,14 @@ async def _flight_check_impl(
             "live_error": None if rya_ok else ryanair_result.get("error"),
         }
         if rya_ok:
+            rya_best = ryanair_result.get("best_price")
+            rya_cur = ryanair_result.get("currency")
             rya_opt.update({
                 "flights": ryanair_result.get("flights", []),
                 "flight_count": ryanair_result.get("flight_count", 0),
-                "best_price": ryanair_result.get("best_price"),
-                "currency": ryanair_result.get("currency"),
+                "best_price": rya_best,
+                "currency": rya_cur,
+                "best_price_gbp": await _to_gbp(rya_best, rya_cur, ctx.get("client")),
                 "note": "Ryanair prices are totals for all passengers combined, not per-person.",
             })
             data_sources.append("ryanair-live")

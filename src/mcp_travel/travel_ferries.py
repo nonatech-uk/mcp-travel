@@ -18,6 +18,8 @@ from datetime import date as date_type, datetime
 from typing import Any
 from urllib.parse import urlencode
 
+from mcp_travel.travel_fx import to_gbp as _to_gbp
+
 
 # Format:
 # (origin_port, dest_port, country_to, operator, crossing_min,
@@ -270,6 +272,7 @@ async def check(
                 opt["sailing_count"] = len(sailings)
                 opt["best_price"] = min(available) if available else None
                 opt["currency"] = sailings[0]["currency"] if sailings else None
+                opt["best_price_gbp"] = await _to_gbp(opt["best_price"], opt["currency"], client)
                 opt["data_sources"] = ["dfds-live"]
                 data_sources.add("dfds-live")
             except DFDSError as e:
@@ -305,6 +308,7 @@ async def check(
                 opt["sailing_count"] = len(sailings)
                 opt["best_price"] = min(available) if available else None
                 opt["currency"] = bf_data.get("currency", "GBP")
+                opt["best_price_gbp"] = await _to_gbp(opt["best_price"], opt["currency"], client)
                 opt["data_sources"] = ["brittany-ferries-live"]
                 data_sources.add("brittany-ferries-live")
             except BrittanyFerriesError as e:
@@ -339,6 +343,7 @@ async def check(
                 opt["sailing_count"] = len(sailings)
                 opt["best_price"] = min(available) if available else None
                 opt["currency"] = sailings[0]["currency"] if sailings else "GBP"
+                opt["best_price_gbp"] = await _to_gbp(opt["best_price"], opt["currency"], client)
                 opt["data_sources"] = ["po-ferries-live"]
                 data_sources.add("po-ferries-live")
             except POFerriesError as e:
@@ -383,6 +388,7 @@ async def check(
                 opt["sailing_count"] = len(sailings)
                 opt["best_price"] = min(available) if available else None
                 opt["currency"] = sailings[0]["currency"] if sailings else stena_cur
+                opt["best_price_gbp"] = await _to_gbp(opt["best_price"], opt["currency"], client)
                 opt["data_sources"] = ["stena-line-live"]
                 data_sources.add("stena-line-live")
             except StenaLineError as e:
@@ -414,6 +420,7 @@ async def check(
                 opt["sailing_count"] = len(sailings)
                 opt["best_price"] = min(available) if available else None
                 opt["currency"] = sailings[0]["currency"] if sailings else "EUR"
+                opt["best_price_gbp"] = await _to_gbp(opt["best_price"], opt["currency"], client)
                 opt["data_sources"] = ["irish-ferries-live"]
                 data_sources.add("irish-ferries-live")
             except IrishFerriesError as e:

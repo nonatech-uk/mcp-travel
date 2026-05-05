@@ -129,6 +129,63 @@ async def resolve_place(client: httpx.AsyncClient, query: str) -> dict[str, Any]
     return None
 
 
+async def stationboard(
+    client: httpx.AsyncClient,
+    station: str,
+    kind: str = "departure",
+    limit: int = 10,
+) -> dict[str, Any]:
+    """Live departures or arrivals at an SNCF stop_area via Navitia.
+
+    `station` is a name, Navitia stop_area id, or 'lat;lon' coords.
+    Resolves via /places (stop_area first), then queries the
+    /coverage/sncf/stop_areas/{id}/{departures|arrivals} endpoint.
+    """
+    if kind not in ("departure", "arrival"):
+        raise SncfError(f"kind must be 'departure' or 'arrival', got {kind!r}")
+    resolved = await resolve_place(client, station)
+    if not resolved or not resolved.get("id"):
+        raise SncfError(f"unknown SNCF place {station!r}")
+    sid = resolved["id"]
+
+    endpoint = "departures" if kind == "departure" else "arrivals"
+    resp = await client.get(
+        f"{NAV_BASE}/stop_areas/{sid}/{endpoint}",
+        params={"count": limit},
+        auth=_auth(),
+        timeout=20.0,
+    )
+    if resp.status_code >= 400:
+        raise SncfError(f"sncf /{endpoint} {resp.status_code}: {resp.text[:300]}")
+    payload = resp.json()
+    rows_raw = payload.get(endpoint) or []
+
+    rows = []
+    for r in rows_raw[:limit]:
+        sdt = r.get("stop_date_time") or {}
+        di = (r.get("display_informations") or {})
+        route = (r.get("route") or {})
+        time_field = sdt.get("departure_date_time") if kind == "departure" else sdt.get("arrival_date_time")
+        base_field = sdt.get("base_departure_date_time") if kind == "departure" else sdt.get("base_arrival_date_time")
+        rows.append({
+            "time": time_field,
+            "planned_time": base_field,
+            "destination": di.get("direction") or route.get("name"),
+            "platform": (sdt.get("data_freshness") and r.get("stop_point", {}).get("name")) or None,
+            "line_name": di.get("label") or di.get("commercial_mode"),
+            "headsign": di.get("headsign"),
+            "operator": di.get("network"),
+            "physical_mode": di.get("physical_mode"),
+        })
+    return {
+        "station": resolved.get("name"),
+        "id": sid,
+        "kind": kind,
+        "row_count": len(rows),
+        "rows": rows,
+    }
+
+
 def _summarise_section(s: dict) -> dict:
     kind = s.get("type")
     out: dict[str, Any] = {

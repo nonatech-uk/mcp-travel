@@ -43,16 +43,20 @@ from mcp_travel.travel_hotels import search as hotels_search
 from mcp_travel.travel_multi_leg import plan_multi_leg_impl
 from mcp_travel.travel_plan import plan_trip_impl
 from mcp_travel.travel_sncf import (
-    SncfError, search_journey as sncf_search, find_place as sncf_find_place,
+    SncfError, search_journey as sncf_search,
+    find_place as sncf_find_place, stationboard as sncf_stationboard,
 )
 from mcp_travel.travel_ns import (
-    NSError, search_journey as ns_search, find_station as ns_find_station,
+    NSError, search_journey as ns_search,
+    find_station as ns_find_station, stationboard as ns_stationboard,
 )
 from mcp_travel.travel_sncb import (
-    SNCBError, search_journey as sncb_search, find_station as sncb_find_station,
+    SNCBError, search_journey as sncb_search,
+    find_station as sncb_find_station, stationboard as sncb_stationboard,
 )
 from mcp_travel.travel_db import (
-    DBError, search_journey as db_search, find_station as db_find_station,
+    DBError, search_journey as db_search,
+    find_station as db_find_station, stationboard as db_stationboard,
 )
 from mcp_travel.travel_trenitalia import (
     TrenitaliaError,
@@ -62,10 +66,12 @@ from mcp_travel.travel_trenitalia import (
 from mcp_travel.travel_renfe import RenfeError, search_journey as renfe_search
 from mcp_travel.travel_austria import AustriaError, search_journey as austria_search
 from mcp_travel.travel_norway import (
-    NorwayError, search_journey as norway_search, find_stop as norway_find_stop,
+    NorwayError, search_journey as norway_search,
+    find_stop as norway_find_stop, stationboard as norway_stationboard,
 )
 from mcp_travel.travel_sweden import (
-    SwedenError, search_journey as sweden_search, find_station as sweden_find_station,
+    SwedenError, search_journey as sweden_search,
+    find_station as sweden_find_station, stationboard as sweden_stationboard,
 )
 from mcp_travel.travel_uber import UberError, price_estimates as uber_prices, time_estimates as uber_times, _deeplink as uber_deeplink
 from mcp_travel.travel_tfl import (
@@ -2360,6 +2366,80 @@ async def travel_rail_se_find_station(query: str, limit: int = 5) -> str:
     return json.dumps({
         "ok": True, "query": query, "match_count": len(matches), "matches": matches,
     }, indent=2)
+
+
+# --- Stage 3c stationboard tools (added 2026-05-05) --------------------
+# Six new live-departures/arrivals tools matching the surface UK + CH
+# already had. Each accepts station name or operator-native ID, returns
+# up to N rows.
+
+@mcp.tool()
+async def travel_rail_fr_stationboard(
+    station: str, kind: str = "departure", limit: int = 10,
+) -> str:
+    """Live departures or arrivals at an SNCF stop_area via Navitia.
+
+    `station` is a name ('Paris Gare de Lyon'), Navitia stop_area id,
+    or 'lat;lon' coords. `kind` is 'departure' (default) or 'arrival'.
+    """
+    res = await sncf_stationboard(_ctx()["client"], station, kind=kind, limit=limit)
+    return json.dumps({"ok": True, **res}, indent=2)
+
+
+@mcp.tool()
+async def travel_rail_nl_stationboard(
+    station: str, kind: str = "departure", limit: int = 10,
+) -> str:
+    """Live departures or arrivals at an NS station.
+
+    `station` accepts a 2-6 letter NS code ('ASD') or a name ('Amsterdam').
+    `kind` is 'departure' (default) or 'arrival'.
+    """
+    res = await ns_stationboard(_ctx()["client"], station, kind=kind, limit=limit)
+    return json.dumps({"ok": True, **res}, indent=2)
+
+
+@mcp.tool()
+async def travel_rail_be_stationboard(
+    station: str, kind: str = "departure", limit: int = 10,
+) -> str:
+    """Live departures or arrivals at an SNCB / NMBS station via iRail
+    /liveboard. `station` is a name or iRail standardname."""
+    res = await sncb_stationboard(_ctx()["client"], station, kind=kind, limit=limit)
+    return json.dumps({"ok": True, **res}, indent=2)
+
+
+@mcp.tool()
+async def travel_rail_de_stationboard(
+    station: str, kind: str = "departure", limit: int = 10,
+) -> str:
+    """Live departures or arrivals at a DB station via db-rest
+    /stops/{id}/{departures|arrivals}. `station` is a name or db-rest id.
+    """
+    res = await db_stationboard(_ctx()["client"], station, kind=kind, limit=limit)
+    return json.dumps({"ok": True, **res}, indent=2)
+
+
+@mcp.tool()
+async def travel_rail_no_stationboard(
+    station: str, kind: str = "departure", limit: int = 10,
+) -> str:
+    """Live departures or arrivals at a Norwegian Entur stop. `station` is
+    a name, NSR id, or anything Entur's geocoder accepts.
+    """
+    res = await norway_stationboard(_ctx()["client"], station, kind=kind, limit=limit)
+    return json.dumps({"ok": True, **res}, indent=2)
+
+
+@mcp.tool()
+async def travel_rail_se_stationboard(
+    station: str, kind: str = "departure", limit: int = 10,
+) -> str:
+    """Live departures or arrivals at a Swedish ResRobot station via
+    /v2.1/{departureBoard|arrivalBoard}. `station` is a name or extId.
+    """
+    res = await sweden_stationboard(_ctx()["client"], station, kind=kind, limit=limit)
+    return json.dumps({"ok": True, **res}, indent=2)
 
 
 # --- Stage 3a deprecation aliases (renamed 2026-05-05) -----------------

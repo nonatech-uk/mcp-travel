@@ -115,6 +115,56 @@ async def resolve_station(client: httpx.AsyncClient, query: str) -> str | None:
     return None
 
 
+async def stationboard(
+    client: httpx.AsyncClient,
+    station: str,
+    kind: str = "departure",
+    limit: int = 10,
+) -> dict[str, Any]:
+    """Live departures or arrivals at an SNCB / NMBS station via iRail
+    /liveboard. `station` is a name or iRail standardname; resolved
+    via the cached station list."""
+    if kind not in ("departure", "arrival"):
+        raise SNCBError(f"kind must be 'departure' or 'arrival', got {kind!r}")
+    name = await resolve_station(client, station)
+    if not name:
+        raise SNCBError(f"unknown SNCB station {station!r}")
+
+    resp = await client.get(
+        f"{IRAIL_BASE}/liveboard/",
+        params={"station": name, "arrdep": kind, "format": "json"},
+        headers={"User-Agent": IRAIL_UA},
+        follow_redirects=True,
+        timeout=20.0,
+    )
+    if resp.status_code >= 400:
+        raise SNCBError(f"irail /liveboard {resp.status_code}: {resp.text[:300]}")
+    payload = resp.json()
+    container = payload.get("departures") or payload.get("arrivals") or {}
+    rows_raw = container.get("departure") or container.get("arrival") or []
+
+    rows = []
+    for r in rows_raw[:limit]:
+        platform = (r.get("platform") or {})
+        platform_str = platform.get("name") if isinstance(platform, dict) else str(platform)
+        rows.append({
+            "time": _epoch_to_iso(r.get("time")),
+            "delay_seconds": int(r.get("delay") or 0),
+            "destination" if kind == "departure" else "origin": (
+                r.get("station") or r.get("stationinfo", {}).get("standardname")
+            ),
+            "platform": platform_str,
+            "vehicle": r.get("vehicle"),
+            "canceled": bool(int(r.get("canceled") or 0)),
+        })
+    return {
+        "station": name,
+        "kind": kind,
+        "row_count": len(rows),
+        "rows": rows,
+    }
+
+
 def _summarise_via(via: dict) -> dict:
     arr = via.get("arrival") or {}
     dep = via.get("departure") or {}

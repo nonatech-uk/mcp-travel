@@ -101,6 +101,63 @@ def _ensure_list(x: Any) -> list:
     return [x]
 
 
+async def stationboard(
+    client: httpx.AsyncClient,
+    station: str,
+    kind: str = "departure",
+    limit: int = 10,
+) -> dict[str, Any]:
+    """Live departures or arrivals at a Swedish ResRobot station via
+    /v2.1/{departureBoard|arrivalBoard}. `station` is a name or ResRobot
+    extId."""
+    if kind not in ("departure", "arrival"):
+        raise SwedenError(f"kind must be 'departure' or 'arrival', got {kind!r}")
+    resolved = await resolve_station(client, station)
+    if not resolved or not resolved.get("id"):
+        raise SwedenError(f"unknown ResRobot station {station!r}")
+    sid = resolved["id"]
+
+    endpoint = "departureBoard" if kind == "departure" else "arrivalBoard"
+    resp = await client.get(
+        f"{RESROBOT_BASE}/{endpoint}",
+        params={"id": sid, "format": "json", "accessId": _api_key(), "maxJourneys": limit},
+        timeout=20.0,
+    )
+    if resp.status_code >= 400:
+        raise SwedenError(f"resrobot /{endpoint} {resp.status_code}: {resp.text[:300]}")
+    payload = resp.json()
+    rows_raw = payload.get("Departure") or payload.get("Arrival") or []
+
+    rows = []
+    for r in rows_raw[:limit]:
+        product = (r.get("ProductAtStop") or (r.get("Product") or [{}])[0] if r.get("Product") else {}) or {}
+        date = r.get("rtDate") or r.get("date")
+        time_field = r.get("rtTime") or r.get("time")
+        iso = f"{date}T{time_field}" if date and time_field else None
+        rows.append({
+            "time": iso,
+            "planned_time": (
+                f"{r.get('date')}T{r.get('time')}"
+                if r.get("date") and r.get("time") else None
+            ),
+            "destination" if kind == "departure" else "origin": (
+                r.get("direction") or r.get("origin")
+            ),
+            "platform": (r.get("rtTrack") or r.get("track")),
+            "line_name": product.get("name") or product.get("displayNumber"),
+            "category": product.get("catOut") or product.get("catCode"),
+            "operator": product.get("operator"),
+            "cancelled": bool(r.get("cancelled")),
+        })
+    return {
+        "station": resolved["name"],
+        "id": sid,
+        "kind": kind,
+        "row_count": len(rows),
+        "rows": rows,
+    }
+
+
 def _summarise_leg(leg: dict) -> dict:
     o = leg.get("Origin") or {}
     d = leg.get("Destination") or {}

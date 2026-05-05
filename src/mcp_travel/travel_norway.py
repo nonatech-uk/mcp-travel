@@ -44,7 +44,13 @@ async def find_stop(
     if resp.status_code >= 400:
         raise NorwayError(f"entur geocoder {resp.status_code}: {resp.text[:300]}")
     feats = resp.json().get("features") or []
-    rail_like = ("railStation", "onstreetTram", "metroStation")
+    # Two-tier preference: actual rail/metro first, then light rail
+    # (onstreetTram), then everything else. A "Bergen" search returns
+    # both "Bergen lufthavn" (categories include onstreetTram + airport)
+    # and "Bergen stasjon" (categories include railStation) — without
+    # the tier split, the airport bus stop wins on alphabetical order.
+    tier1 = ("railStation", "metroStation")
+    tier2 = ("onstreetTram",)
 
     def shape(f: dict) -> dict:
         props = f.get("properties") or {}
@@ -57,9 +63,16 @@ async def find_stop(
             "lon": coord[0],
         }
 
-    preferred = [f for f in feats if any(c in rail_like for c in (f.get("properties") or {}).get("category") or [])]
-    rest = [f for f in feats if f not in preferred]
-    return [shape(f) for f in (preferred + rest)[:limit]]
+    def _tier(f: dict) -> int:
+        cats = (f.get("properties") or {}).get("category") or []
+        if any(c in tier1 for c in cats):
+            return 0
+        if any(c in tier2 for c in cats):
+            return 1
+        return 2
+
+    feats_sorted = sorted(feats, key=_tier)
+    return [shape(f) for f in feats_sorted[:limit]]
 
 
 async def resolve_stop(client: httpx.AsyncClient, query: str) -> dict[str, Any] | None:
@@ -124,6 +137,90 @@ query Trip($from: Location!, $to: Location!, $dt: DateTime!, $n: Int!, $arriveBy
   }
 }
 """.strip()
+
+
+_STOPBOARD_QUERY = """
+query Board($id: String!, $n: Int!, $kind: ArrivalDeparture!) {
+  stopPlace(id: $id) {
+    id
+    name
+    estimatedCalls(numberOfDepartures: $n, arrivalDeparture: $kind) {
+      expectedDepartureTime
+      expectedArrivalTime
+      aimedDepartureTime
+      aimedArrivalTime
+      cancellation
+      destinationDisplay { frontText }
+      quay { id publicCode }
+      serviceJourney {
+        line { id publicCode name transportMode operator { name } }
+      }
+    }
+  }
+}
+"""
+
+
+async def stationboard(
+    client: httpx.AsyncClient,
+    station: str,
+    kind: str = "departure",
+    limit: int = 10,
+) -> dict[str, Any]:
+    """Live departures or arrivals at a Norwegian Entur stop. `station`
+    is a name, NSR id, or anything Entur's geocoder accepts."""
+    if kind not in ("departure", "arrival"):
+        raise NorwayError(f"kind must be 'departure' or 'arrival', got {kind!r}")
+    # find_stop ranks railStation/metroStation/onstreetTram first, so picking
+    # its head element gives a far better stationboard target than
+    # resolve_stop, which just takes the geocoder's top match (often a bus
+    # stop or airport entry that shares the place name).
+    candidates = await find_stop(client, station, limit=5)
+    if not candidates:
+        raise NorwayError(f"unknown Entur stop {station!r}")
+    resolved = candidates[0]
+    sid = resolved["id"]
+
+    body = {
+        "query": _STOPBOARD_QUERY,
+        "variables": {
+            "id": sid, "n": limit,
+            "kind": "arrivals" if kind == "arrival" else "departures",
+        },
+    }
+    resp = await client.post(
+        ENTUR_GRAPHQL,
+        json=body,
+        headers={"User-Agent": ENTUR_UA, "ET-Client-Name": "nonatech-mcp-travel"},
+        timeout=20.0,
+    )
+    if resp.status_code >= 400:
+        raise NorwayError(f"entur graphql {resp.status_code}: {resp.text[:300]}")
+    data = resp.json().get("data") or {}
+    sp = data.get("stopPlace") or {}
+    calls = sp.get("estimatedCalls") or []
+
+    rows = []
+    for c in calls[:limit]:
+        line = ((c.get("serviceJourney") or {}).get("line") or {})
+        quay = c.get("quay") or {}
+        rows.append({
+            "time": c.get("expectedDepartureTime") if kind == "departure" else c.get("expectedArrivalTime"),
+            "planned_time": c.get("aimedDepartureTime") if kind == "departure" else c.get("aimedArrivalTime"),
+            "destination": (c.get("destinationDisplay") or {}).get("frontText"),
+            "platform": quay.get("publicCode") or quay.get("id"),
+            "line_name": line.get("publicCode") or line.get("name"),
+            "transport_mode": line.get("transportMode"),
+            "operator": (line.get("operator") or {}).get("name"),
+            "cancelled": bool(c.get("cancellation")),
+        })
+    return {
+        "station": sp.get("name") or resolved.get("name"),
+        "id": sid,
+        "kind": kind,
+        "row_count": len(rows),
+        "rows": rows,
+    }
 
 
 def _summarise_pattern(p: dict) -> dict:

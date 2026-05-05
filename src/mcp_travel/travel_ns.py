@@ -7,6 +7,8 @@ covers personal use; sign up at apiportal.ns.nl, subscribe to the
 Endpoints used:
   GET /v2/stations          — full station list (cached)
   GET /v3/trips             — journey planner
+  GET /v2/departures        — live departures from a station
+  GET /v2/arrivals          — live arrivals into a station
 
 Free-text origin/destination is resolved via case-insensitive substring
 match on the station list (cached at module level after first call).
@@ -103,6 +105,67 @@ async def resolve_station(client: httpx.AsyncClient, query: str) -> dict[str, An
         if q in (s.get("namen", {}).get("lang") or "").lower():
             return {"code": s["code"], "name": s["namen"]["lang"], "country": s.get("land")}
     return None
+
+
+async def stationboard(
+    client: httpx.AsyncClient,
+    station: str,
+    kind: str = "departure",
+    limit: int = 10,
+) -> dict[str, Any]:
+    """Live departures or arrivals at an NS station.
+
+    `station` accepts a 2-6 letter NS code (e.g. 'ASD') or a name —
+    names resolve via the station cache. `kind` is 'departure' or
+    'arrival'. Returns up to `limit` rows.
+    """
+    if kind not in ("departure", "arrival"):
+        raise NSError(f"kind must be 'departure' or 'arrival', got {kind!r}")
+    resolved = await resolve_station(client, station)
+    if not resolved:
+        raise NSError(f"unknown NS station {station!r}")
+    code = resolved["code"]
+
+    endpoint = "departures" if kind == "departure" else "arrivals"
+    resp = await client.get(
+        f"{NS_BASE}/v2/{endpoint}",
+        params={"station": code, "maxJourneys": limit},
+        headers=_headers(),
+        timeout=20.0,
+    )
+    if resp.status_code >= 400:
+        raise NSError(f"ns /{endpoint} {resp.status_code}: {resp.text[:300]}")
+    payload = (resp.json().get("payload") or {})
+    rows_raw = payload.get(endpoint) or []
+
+    rows = []
+    for r in rows_raw[:limit]:
+        # NS uses different field names per direction; normalise.
+        if kind == "departure":
+            other = r.get("direction")  # head-sign / final destination
+            time_field = r.get("actualDateTime") or r.get("plannedDateTime")
+        else:
+            other = r.get("origin")
+            time_field = r.get("actualDateTime") or r.get("plannedDateTime")
+        product = r.get("product") or {}
+        rows.append({
+            "time": time_field,
+            "planned_time": r.get("plannedDateTime"),
+            "destination" if kind == "departure" else "origin": other,
+            "platform": r.get("actualTrack") or r.get("plannedTrack"),
+            "category": product.get("shortCategoryName") or product.get("longCategoryName"),
+            "operator": product.get("operatorName"),
+            "train_number": product.get("number"),
+            "cancelled": bool(r.get("cancelled")),
+            "delay_seconds": r.get("delayInSeconds"),
+        })
+    return {
+        "station": resolved["name"],
+        "code": code,
+        "kind": kind,
+        "row_count": len(rows),
+        "rows": rows,
+    }
 
 
 def _summarise_leg(leg: dict) -> dict:

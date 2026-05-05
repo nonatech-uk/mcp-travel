@@ -93,6 +93,58 @@ def _summarise_leg(leg: dict) -> dict:
     }
 
 
+async def stationboard(
+    client: httpx.AsyncClient,
+    station: str,
+    kind: str = "departure",
+    limit: int = 10,
+) -> dict[str, Any]:
+    """Live departures or arrivals at a DB station via db-rest
+    /stops/{id}/{departures|arrivals}. `station` is a name or db-rest id."""
+    if kind not in ("departure", "arrival"):
+        raise DBError(f"kind must be 'departure' or 'arrival', got {kind!r}")
+    resolved = await resolve_station(client, station)
+    if not resolved:
+        raise DBError(f"unknown DB station {station!r}")
+    sid = resolved["id"]
+
+    endpoint = "departures" if kind == "departure" else "arrivals"
+    resp = await client.get(
+        f"{_base()}/stops/{sid}/{endpoint}",
+        params={"results": limit, "duration": 60},
+        headers={"User-Agent": DB_UA},
+        timeout=20.0,
+    )
+    if resp.status_code >= 400:
+        raise DBError(f"db-rest /{endpoint} {resp.status_code}: {resp.text[:300]}")
+    payload = resp.json()
+    rows_raw = payload.get(endpoint) or payload if isinstance(payload, list) else (payload.get(endpoint) or [])
+
+    rows = []
+    for r in rows_raw[:limit]:
+        line = r.get("line") or {}
+        other = (r.get("destination") or r.get("origin") or {})
+        rows.append({
+            "time": r.get("when") or r.get("plannedWhen"),
+            "planned_time": r.get("plannedWhen"),
+            "delay_seconds": r.get("delay"),
+            "destination" if kind == "departure" else "origin": other.get("name"),
+            "platform": r.get("platform") or r.get("plannedPlatform"),
+            "line_name": line.get("name"),
+            "product": line.get("product"),
+            "operator": (line.get("operator") or {}).get("name"),
+            "trip_id": r.get("tripId"),
+            "cancelled": bool(r.get("cancelled")),
+        })
+    return {
+        "station": resolved["name"],
+        "id": sid,
+        "kind": kind,
+        "row_count": len(rows),
+        "rows": rows,
+    }
+
+
 def _summarise_journey(j: dict) -> dict:
     legs = [_summarise_leg(l) for l in (j.get("legs") or [])]
     pt_legs = [l for l in legs if not l.get("is_walking")]

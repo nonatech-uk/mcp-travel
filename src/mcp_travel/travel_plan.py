@@ -460,6 +460,8 @@ async def build_flight(
     exclude_carriers: list[str] | None = None,
     origin_region: str = "uk",
     origin_country: str | None = None,
+    origin_lat: float | None = None,
+    origin_lon: float | None = None,
     dest_country: str | None = None,
 ) -> dict[str, Any]:
     airports = REGION_AIRPORTS.get(region) or {"origin": ["LGW"], "destination": ["CDG"]}
@@ -469,14 +471,18 @@ async def build_flight(
     # though REGION_AIRPORTS would default UK origins to LGW. For UK
     # origins without a city match, keep the existing LGW-from-
     # REGION_AIRPORTS default (Surrey-style household). For non-UK,
-    # fall back to country picker.
+    # fall back to country picker (which itself uses geo-distance when
+    # coords are available).
     hinted = pick_airport_for_city(origin)
     if hinted:
         origin_iata = hinted
     elif origin_region == "uk":
         origin_iata = airports["origin"][0]
     else:
-        origin_iata = pick_airport_by_country(origin_country, hint_text=origin)
+        origin_iata = pick_airport_by_country(
+            origin_country, hint_text=origin,
+            lat=origin_lat, lon=origin_lon,
+        )
         if not origin_iata:
             return {
                 "ok": False, "mode": "flight",
@@ -495,6 +501,7 @@ async def build_flight(
     else:
         dest_iata = pick_airport_by_country(
             dest_country, hint_text=dest.get("display_name") or dest.get("query"),
+            lat=dest.get("lat"), lon=dest.get("lon"),
         )
         if not dest_iata:
             return {
@@ -1433,10 +1440,14 @@ async def plan_trip_impl(
         flight_dests = region_aps["destination"]
     else:
         # Region isn't in REGION_AIRPORTS — pick by destination country
-        # with the destination string as a city hint (so Tromso → TOS,
-        # not just Norway-default-OSL).
+        # with the destination string as a city hint AND geographic
+        # coords as a tiebreaker (so 'Tromso' → TOS via city name,
+        # 'Koppangen, Lyngen, Norway' → TOS via geo-distance, vs the
+        # naive country-list[0] = OSL which would mean a 22h drive).
         picked = pick_airport_by_country(
-            geo.get("country_code"), hint_text=geo.get("display_name") or destination,
+            geo.get("country_code"),
+            hint_text=geo.get("display_name") or destination,
+            lat=geo.get("lat"), lon=geo.get("lon"),
         )
         flight_dests = [picked] if picked else []
 
@@ -1458,6 +1469,8 @@ async def plan_trip_impl(
                                            exclude_carriers=exclude_carriers,
                                            origin_region=origin_region,
                                            origin_country=(origin_geo or {}).get("country_code"),
+                                           origin_lat=(origin_geo or {}).get("lat"),
+                                           origin_lon=(origin_geo or {}).get("lon"),
                                            dest_country=geo.get("country_code"))))
         elif m == "fly_geneva_drive":
             tasks.append(("fly_geneva_drive",
@@ -1467,6 +1480,8 @@ async def plan_trip_impl(
                                        exclude_carriers=exclude_carriers,
                                        origin_region=origin_region,
                                        origin_country=(origin_geo or {}).get("country_code"),
+                                       origin_lat=(origin_geo or {}).get("lat"),
+                                       origin_lon=(origin_geo or {}).get("lon"),
                                        dest_country=geo.get("country_code"))))
         elif m == "north_sea_ferry":
             tasks.append(("north_sea_ferry",

@@ -425,6 +425,101 @@ AIRPORT_RAIL_STATIONS: dict[str, dict[str, Any]] = {
 }
 
 
+# Airport coordinates (lat, lon) for the airports in AIRPORTS_BY_COUNTRY.
+# Used by pick_airport_nearest to choose the closest airport when the
+# destination/origin doesn't match a known city in CITY_TO_IATA — fixes
+# cases like "Koppangen, Lyngen, Norway" where the country-list default
+# (OSL = Oslo Gardermoen, 1670km drive) is absurd vs the actual nearest
+# airport (TOS = Tromsø, ~120km).
+AIRPORT_COORDINATES: dict[str, tuple[float, float]] = {
+    # UK
+    "LHR": (51.4700, -0.4543),  "LGW": (51.1481, -0.1903),
+    "STN": (51.8860,  0.2389),  "MAN": (53.3537, -2.2750),
+    "LPL": (53.3336, -2.8497),  "EDI": (55.9500, -3.3725),
+    "GLA": (55.8721, -4.4331),  "BHX": (52.4539, -1.7480),
+    "BRS": (51.3827, -2.7191),
+    # Ireland
+    "DUB": (53.4213, -6.2701),  "ORK": (51.8413, -8.4911),
+    "SNN": (52.7019, -8.9248),
+    # Switzerland
+    "ZRH": (47.4647,  8.5492),  "GVA": (46.2381,  6.1090),
+    "BSL": (47.5896,  7.5298),
+    # Italy
+    "FCO": (41.8003, 12.2389),  "MXP": (45.6306,  8.7281),
+    "BLQ": (44.5354, 11.2887),  "VCE": (45.5053, 12.3519),
+    "NAP": (40.8861, 14.2908),  "FLR": (43.8100, 11.2050),
+    # France
+    "CDG": (49.0097,  2.5479),  "ORY": (48.7233,  2.3794),
+    "LYS": (45.7256,  5.0811),  "MRS": (43.4393,  5.2214),
+    "NCE": (43.6584,  7.2158),  "TLS": (43.6291,  1.3636),
+    "BOD": (44.8283, -0.7156),  "NTE": (47.1532, -1.6107),
+    # Germany
+    "FRA": (50.0379,  8.5622),  "MUC": (48.3538, 11.7861),
+    "BER": (52.3667, 13.5033),  "DUS": (51.2895,  6.7668),
+    "HAM": (53.6304,  9.9882),  "STR": (48.6899,  9.2220),
+    # Other Western Europe
+    "AMS": (52.3105,  4.7683),  "EIN": (51.4583,  5.3922),
+    "BRU": (50.9014,  4.4844),  "CRL": (50.4592,  4.4538),
+    "LUX": (49.6233,  6.2044),  "VIE": (48.1103, 16.5697),
+    "SZG": (47.7933, 13.0043),  "INN": (47.2602, 11.3439),
+    # Iberia
+    "MAD": (40.4983, -3.5676),  "BCN": (41.2974,  2.0833),
+    "AGP": (36.6749, -4.4991),  "PMI": (39.5517,  2.7388),
+    "VLC": (39.4893, -0.4816),  "SVQ": (37.4180, -5.8931),
+    "LIS": (38.7813, -9.1359),  "OPO": (41.2481, -8.6814),
+    "FAO": (37.0144, -7.9659),
+    # Nordic
+    "OSL": (60.1939, 11.1004),  "BGO": (60.2934,  5.2181),
+    "TRD": (63.4578, 10.9239),  "TOS": (69.6833, 18.9189),
+    "SVG": (58.8767,  5.6378),  "ARN": (59.6519, 17.9186),
+    "GOT": (57.6628, 12.2798),  "MMX": (55.5364, 13.3762),
+    "CPH": (55.6181, 12.6561),  "BLL": (55.7400,  9.1518),
+    "HEL": (60.3172, 24.9633),  "TKU": (60.5141, 22.2628),
+    "KEF": (63.9850, -22.6056),
+    # Eastern + South-east
+    "WAW": (52.1657, 20.9671),  "KRK": (50.0777, 19.7848),
+    "GDN": (54.3776, 18.4662),  "PRG": (50.1008, 14.2632),
+    "BUD": (47.4369, 19.2611),  "ATH": (37.9364, 23.9444),
+    "SKG": (40.5197, 22.9709),  "OTP": (44.5711, 26.0850),
+    "SOF": (42.6951, 23.4114),  "ZAG": (45.7429, 16.0688),
+    "SPU": (43.5389, 16.2980),  "DBV": (42.5614, 18.2683),
+    "LJU": (46.2237, 14.4576),  "BTS": (48.1702, 17.2127),
+}
+
+
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance between two lat/lon points in km."""
+    import math
+    R = 6371.0
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = (math.sin(dlat / 2) ** 2 +
+         math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2)
+    return 2 * R * math.asin(math.sqrt(a))
+
+
+def pick_airport_nearest(
+    lat: float, lon: float,
+    country_code: str | None = None,
+) -> str | None:
+    """Return the airport (from AIRPORTS_BY_COUNTRY[country_code], or
+    globally if no country given) whose coords are closest to (lat, lon).
+    None if no candidates have known coords."""
+    if country_code:
+        candidates = AIRPORTS_BY_COUNTRY.get(country_code.upper()) or []
+    else:
+        candidates = list(AIRPORT_COORDINATES.keys())
+    best: tuple[str, float] | None = None
+    for iata in candidates:
+        coords = AIRPORT_COORDINATES.get(iata)
+        if not coords:
+            continue
+        d = _haversine_km(lat, lon, coords[0], coords[1])
+        if best is None or d < best[1]:
+            best = (iata, d)
+    return best[0] if best else None
+
+
 def pick_airport_for_city(hint_text: str | None) -> str | None:
     """City-hint-only pick — no country fallback. Use this when you
     want to override an existing airport choice ONLY when a known city
@@ -440,15 +535,26 @@ def pick_airport_for_city(hint_text: str | None) -> str | None:
 
 
 def pick_airport_by_country(
-    country_code: str | None, hint_text: str | None = None,
+    country_code: str | None,
+    hint_text: str | None = None,
+    lat: float | None = None,
+    lon: float | None = None,
 ) -> str | None:
-    """Pick an airport IATA for a country, optionally narrowed by a
-    city-name hint (origin string, destination display name, etc).
-    Returns the best guess or None if no mapping exists.
+    """Pick an airport IATA. Precedence:
+      1. City-name hint (CITY_TO_IATA — explicit user intent wins)
+      2. Geographic distance from (lat, lon) within the country
+         (handles small places like 'Koppangen, Lyngen' that aren't
+         in CITY_TO_IATA — picks TOS not OSL)
+      3. Country list[0] fallback (the national hub)
+    Returns None if no mapping exists at any level.
     """
     hinted = pick_airport_for_city(hint_text)
     if hinted:
         return hinted
+    if lat is not None and lon is not None:
+        nearest = pick_airport_nearest(lat, lon, country_code)
+        if nearest:
+            return nearest
     if country_code:
         airports = AIRPORTS_BY_COUNTRY.get(country_code.upper())
         if airports:

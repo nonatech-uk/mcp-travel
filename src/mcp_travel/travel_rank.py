@@ -258,7 +258,7 @@ ORIGIN_GATED_MODES: dict[str, set[str]] = {
 
 AIRPORTS_BY_COUNTRY: dict[str, list[str]] = {
     # Western Europe
-    "GB": ["LHR", "LGW", "STN", "MAN", "EDI", "GLA"],
+    "GB": ["LHR", "LGW", "STN", "MAN", "EDI", "GLA", "LPL", "BHX", "BRS"],
     "IE": ["DUB", "ORK", "SNN"],
     "FR": ["CDG", "ORY", "LYS", "MRS", "TLS", "BOD", "NTE", "NCE"],
     "BE": ["BRU", "CRL"],
@@ -328,8 +328,9 @@ CITY_TO_IATA: dict[str, str] = {
     "thessaloniki": "SKG", "bucharest": "OTP", "sofia": "SOF",
     "zagreb": "ZAG", "split": "SPU", "dubrovnik": "DBV",
     # UK / Ireland
-    "dublin": "DUB", "cork": "ORK", "london": "LHR",
+    "dublin": "DUB", "cork": "ORK", "london": "LGW",  # household uses LGW
     "manchester": "MAN", "edinburgh": "EDI", "glasgow": "GLA",
+    "liverpool": "LPL", "birmingham": "BHX", "bristol": "BRS",
 }
 
 
@@ -339,13 +340,103 @@ CITY_TO_IATA: dict[str, str] = {
 # competitive *and* we have a journey planner for the country.
 # `extra_min` covers any airport-shuttle leg (e.g. EAP at Basel is on
 # French soil, no direct rail; Basel SBB station + 15-20min bus).
-AIRPORT_RAIL_STATIONS: dict[str, dict[str, Any]] = {
-    "LGW": {"station": "Gatwick Airport", "country": "GB", "extra_min": 0},
-    "ZRH": {"station": "Zürich Flughafen", "country": "CH", "extra_min": 0},
-    "GVA": {"station": "Genève-Aéroport", "country": "CH", "extra_min": 0},
-    "BSL": {"station": "Basel SBB", "country": "CH", "extra_min": 20},
-    "MXP": {"station": "Milano Malpensa Aeroporto", "country": "IT", "extra_min": 0},
+# Full geocoder-friendly names for each IATA — used by the drive-leg
+# computation. Bare IATA codes ("MAN airport") confuse Google Maps:
+# "MAN" gets matched to Manaus (Brazil) and the drive ETA comes back
+# as a 93-hour cross-Atlantic absurdity. Always pass the full city +
+# "Airport" + country.
+AIRPORT_DRIVE_NAMES: dict[str, str] = {
+    # UK
+    "LHR": "Heathrow Airport, UK",
+    "LGW": "Gatwick Airport, UK",
+    "STN": "Stansted Airport, UK",
+    "MAN": "Manchester Airport, UK",
+    "LPL": "Liverpool John Lennon Airport, UK",
+    "EDI": "Edinburgh Airport, UK",
+    "GLA": "Glasgow Airport, UK",
+    "BHX": "Birmingham Airport, UK",
+    "BRS": "Bristol Airport, UK",
+    # Switzerland
+    "ZRH": "Zurich Airport, Switzerland",
+    "GVA": "Geneva Airport, Switzerland",
+    "BSL": "EuroAirport Basel-Mulhouse-Freiburg, France",
+    # Italy
+    "MXP": "Milan Malpensa Airport, Italy",
+    "FCO": "Rome Fiumicino Airport, Italy",
+    "BLQ": "Bologna Airport, Italy",
+    "VCE": "Venice Marco Polo Airport, Italy",
+    "NAP": "Naples Airport, Italy",
+    # France
+    "CDG": "Paris Charles de Gaulle Airport, France",
+    "ORY": "Paris Orly Airport, France",
+    "LYS": "Lyon Saint-Exupéry Airport, France",
+    "MRS": "Marseille Provence Airport, France",
+    "NCE": "Nice Côte d'Azur Airport, France",
+    "TLS": "Toulouse Blagnac Airport, France",
+    # Germany
+    "FRA": "Frankfurt Airport, Germany",
+    "MUC": "Munich Airport, Germany",
+    "BER": "Berlin Brandenburg Airport, Germany",
+    "DUS": "Düsseldorf Airport, Germany",
+    "HAM": "Hamburg Airport, Germany",
+    # Other
+    "AMS": "Amsterdam Schiphol Airport, Netherlands",
+    "BRU": "Brussels Airport, Belgium",
+    "VIE": "Vienna Airport, Austria",
+    "MAD": "Madrid Barajas Airport, Spain",
+    "BCN": "Barcelona El Prat Airport, Spain",
+    "LIS": "Lisbon Airport, Portugal",
+    "DUB": "Dublin Airport, Ireland",
+    # Nordic
+    "OSL": "Oslo Gardermoen Airport, Norway",
+    "BGO": "Bergen Airport, Norway",
+    "TOS": "Tromsø Airport, Norway",
+    "ARN": "Stockholm Arlanda Airport, Sweden",
+    "CPH": "Copenhagen Airport, Denmark",
+    "HEL": "Helsinki Airport, Finland",
+    # Eastern EU
+    "WAW": "Warsaw Chopin Airport, Poland",
+    "PRG": "Prague Airport, Czech Republic",
+    "BUD": "Budapest Airport, Hungary",
+    "ATH": "Athens International Airport, Greece",
 }
+
+
+def airport_drive_target(iata: str) -> str:
+    """Return a Google-Maps-safe full-name for an airport IATA, falling
+    back to bare-IATA-suffix if not in the table."""
+    return AIRPORT_DRIVE_NAMES.get(iata.upper(), f"{iata} airport")
+
+
+AIRPORT_RAIL_STATIONS: dict[str, dict[str, Any]] = {
+    # UK
+    "LGW": {"station": "Gatwick Airport",          "country": "GB", "extra_min": 0},
+    "MAN": {"station": "Manchester Airport",       "country": "GB", "extra_min": 0},
+    # LPL has no on-airport rail station; closest is Liverpool South
+    # Parkway + the 500 bus (~10 min, runs every 12 min). 15-min shuttle
+    # allowance covers walk + wait + bus.
+    "LPL": {"station": "Liverpool South Parkway",  "country": "GB", "extra_min": 15},
+    # Switzerland
+    "ZRH": {"station": "Zürich Flughafen",         "country": "CH", "extra_min": 0},
+    "GVA": {"station": "Genève-Aéroport",          "country": "CH", "extra_min": 0},
+    "BSL": {"station": "Basel SBB",                "country": "CH", "extra_min": 20},
+    # Italy
+    "MXP": {"station": "Milano Malpensa Aeroporto","country": "IT", "extra_min": 0},
+}
+
+
+def pick_airport_for_city(hint_text: str | None) -> str | None:
+    """City-hint-only pick — no country fallback. Use this when you
+    want to override an existing airport choice ONLY when a known city
+    name appears in the hint text (e.g. UK origin defaulting to LGW
+    via REGION_AIRPORTS, but switching to MAN for "Manchester, UK")."""
+    if not hint_text:
+        return None
+    h = hint_text.strip().lower()
+    for city, iata in CITY_TO_IATA.items():
+        if city in h:
+            return iata
+    return None
 
 
 def pick_airport_by_country(
@@ -355,11 +446,9 @@ def pick_airport_by_country(
     city-name hint (origin string, destination display name, etc).
     Returns the best guess or None if no mapping exists.
     """
-    if hint_text:
-        h = hint_text.strip().lower()
-        for city, iata in CITY_TO_IATA.items():
-            if city in h:
-                return iata
+    hinted = pick_airport_for_city(hint_text)
+    if hinted:
+        return hinted
     if country_code:
         airports = AIRPORTS_BY_COUNTRY.get(country_code.upper())
         if airports:

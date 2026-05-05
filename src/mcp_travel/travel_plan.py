@@ -45,11 +45,13 @@ from mcp_travel.travel_rank import (
     REGION_EUROSTAR,
     REGION_MODES,
     SKI_RESORTS,
+    airport_drive_target,
     classify_origin_region,
     classify_region,
     confidence,
     filter_modes_by_origin,
     pick_airport_by_country,
+    pick_airport_for_city,
     score,
 )
 
@@ -462,10 +464,16 @@ async def build_flight(
 ) -> dict[str, Any]:
     airports = REGION_AIRPORTS.get(region) or {"origin": ["LGW"], "destination": ["CDG"]}
 
-    # Origin airport: UK origin uses REGION_AIRPORTS; non-UK origin picks
-    # by country, with the origin string as a city hint (so 'Zermatt'
-    # → ZRH via the Switzerland country list).
-    if origin_region == "uk":
+    # Origin airport selection. Try a city-hint match first so e.g.
+    # "Manchester, UK" picks MAN and "Liverpool, UK" picks LPL, even
+    # though REGION_AIRPORTS would default UK origins to LGW. For UK
+    # origins without a city match, keep the existing LGW-from-
+    # REGION_AIRPORTS default (Surrey-style household). For non-UK,
+    # fall back to country picker.
+    hinted = pick_airport_for_city(origin)
+    if hinted:
+        origin_iata = hinted
+    elif origin_region == "uk":
         origin_iata = airports["origin"][0]
     else:
         origin_iata = pick_airport_by_country(origin_country, hint_text=origin)
@@ -502,7 +510,7 @@ async def build_flight(
     # for Surrey → LGW the drive usually wins. Picker handles both.
     drive_to_apt, rail_alt = await asyncio.gather(
         _drive_or_fallback(
-            ctx["client"], origin, f"{origin_iata} airport",
+            ctx["client"], origin, airport_drive_target(origin_iata),
             _to_iso_z(depart_dt), fallback_min=60,
         ),
         _rail_to_airport(ctx, origin, origin_iata, depart_dt, origin_country),
@@ -569,7 +577,7 @@ async def build_flight(
     arrive_apt = depart_dt + timedelta(minutes=drive_min_uk + AIRPORT_OVERHEAD_MIN + flight_min + 30)
     drive_dest = await _drive_or_fallback(
         ctx["client"],
-        f"{dest_iata} airport",
+        airport_drive_target(dest_iata),
         f"{drive_target_lat},{drive_target_lon}",
         _to_iso_z(arrive_apt),
         # GVA → Alpine ski resort is typically 90-210 min depending on

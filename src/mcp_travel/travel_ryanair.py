@@ -26,7 +26,7 @@ import httpx
 _SCRAPER_URL = os.environ.get(
     "TRAVEL_SCRAPER_URL", "http://mcp-travel-scraper:8080"
 ).rstrip("/")
-_HTTP_TIMEOUT = 60.0
+_HTTP_TIMEOUT = 90.0
 
 
 class RyanairError(RuntimeError):

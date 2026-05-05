@@ -40,12 +40,25 @@ HTTP_TIMEOUT = 20.0
 
 
 def register(mcp: FastMCP) -> None:
-    """Register travel_uk_* tools onto the shared FastMCP instance."""
-    mcp.tool(name="travel_uk_find_station")(uk_find_station)
-    mcp.tool(name="travel_uk_stationboard")(uk_stationboard)
-    mcp.tool(name="travel_uk_journey")(uk_journey)
-    mcp.tool(name="travel_uk_service")(uk_service)
-    mcp.tool(name="travel_uk_disruptions")(uk_disruptions)
+    """Register travel_rail_gb_* tools onto the shared FastMCP instance.
+
+    Old `travel_uk_*` names are kept as deprecation aliases (Stage 3a
+    rename, 2026-05-05). They will be removed in a future release.
+    """
+    # Primary (canonical) names — ISO-2 country code.
+    mcp.tool(name="travel_rail_gb_find_station")(uk_find_station)
+    mcp.tool(name="travel_rail_gb_stationboard")(uk_stationboard)
+    mcp.tool(name="travel_rail_gb_journey")(uk_journey)
+    mcp.tool(name="travel_rail_gb_service")(uk_service)
+    mcp.tool(name="travel_rail_gb_disruptions")(uk_disruptions)
+
+    # Deprecation aliases — old `travel_uk_*` names.
+    _dep = "DEPRECATED: renamed to `travel_rail_gb_{}`. Same signature; same behaviour. Will be removed in a future release."
+    mcp.tool(name="travel_uk_find_station", description=_dep.format("find_station"))(uk_find_station)
+    mcp.tool(name="travel_uk_stationboard", description=_dep.format("stationboard"))(uk_stationboard)
+    mcp.tool(name="travel_uk_journey",      description=_dep.format("journey"))(uk_journey)
+    mcp.tool(name="travel_uk_service",      description=_dep.format("service"))(uk_service)
+    mcp.tool(name="travel_uk_disruptions",  description=_dep.format("disruptions"))(uk_disruptions)
 
 
 # ---------- formatting helpers ----------

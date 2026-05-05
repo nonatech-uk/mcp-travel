@@ -117,7 +117,7 @@ def _trenitalia_url(o_slug: str, d_slug: str, date: str, adults: int) -> str:
 
 def _italo_url(o_slug: str, d_slug: str, date: str) -> str:
     """Legacy Italo URL — points at the now-deprecated booking subdomain.
-    Kept for backwards compatibility with travel_italy_journey output.
+    Kept for backwards compatibility with travel_rail_it_journey output.
     For the working Safari-driven URL see _italo_booking_url() below."""
     o = CITIES[o_slug].get("italo_legacy") or ""
     d = CITIES[d_slug].get("italo_legacy") or ""

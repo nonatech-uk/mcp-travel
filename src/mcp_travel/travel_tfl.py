@@ -19,7 +19,7 @@ What it covers:
     Journey Planner via Open Rail Data feeds)
 
 What it doesn't cover:
-  - Long-distance National Rail (use travel_uk_journey for that)
+  - Long-distance National Rail (use travel_rail_gb_journey for that)
   - Anywhere outside Greater London commuter area
 
 Three useful endpoints exposed:

@@ -93,14 +93,26 @@ def _transportations_list(transportations: list[str] | str | None) -> list[str] 
 # ---------- tools ----------
 
 def register(mcp: FastMCP) -> None:
-    """Register travel_sbb_* tools onto the shared FastMCP instance."""
-    mcp.tool(travel_sbb_find_station)
-    mcp.tool(travel_sbb_journey)
-    mcp.tool(travel_sbb_stationboard)
-    mcp.tool(travel_sbb_disruptions)
+    """Register travel_rail_ch_* tools onto the shared FastMCP instance.
+
+    Old `travel_sbb_*` names are kept as deprecation aliases (Stage 3a
+    rename, 2026-05-05). They will be removed in a future release.
+    """
+    # Primary (canonical) names — ISO-2 country code.
+    mcp.tool(travel_rail_ch_find_station)
+    mcp.tool(travel_rail_ch_journey)
+    mcp.tool(travel_rail_ch_stationboard)
+    mcp.tool(travel_rail_ch_disruptions)
+
+    # Deprecation aliases — old `travel_sbb_*` names.
+    _dep = "DEPRECATED: renamed to `travel_rail_ch_{}`. Same signature; same behaviour. Will be removed in a future release."
+    mcp.tool(name="travel_sbb_find_station", description=_dep.format("find_station"))(travel_rail_ch_find_station)
+    mcp.tool(name="travel_sbb_journey",      description=_dep.format("journey"))(travel_rail_ch_journey)
+    mcp.tool(name="travel_sbb_stationboard", description=_dep.format("stationboard"))(travel_rail_ch_stationboard)
+    mcp.tool(name="travel_sbb_disruptions",  description=_dep.format("disruptions"))(travel_rail_ch_disruptions)
 
 
-async def travel_sbb_find_station(
+async def travel_rail_ch_find_station(
     query: str | None = None,
     lat: float | None = None,
     lon: float | None = None,
@@ -164,7 +176,7 @@ async def travel_sbb_find_station(
     return "\n".join(lines)
 
 
-async def travel_sbb_journey(
+async def travel_rail_ch_journey(
     origin: str,
     destination: str,
     datetime_iso: str,
@@ -192,9 +204,9 @@ async def travel_sbb_journey(
 
     What doesn't (use the right tool instead):
       - Italy-internal (Milano ↔ Roma — both ends Italian)
-                                                    → travel_italy_journey
-      - DB-internal or ÖBB-internal                 → travel_db / travel_austria_journey
-      - Pure BE↔DE (Brussels ↔ Berlin)              → travel_db_journey
+                                                    → travel_rail_it_journey
+      - DB-internal or ÖBB-internal                 → travel_rail_de_journey / travel_rail_at_journey
+      - Pure BE↔DE (Brussels ↔ Berlin)              → travel_rail_de_journey
       - Cross-Channel (London ↔ anywhere)           → travel_eurostar_check
       - ⚠ Both ends in Italy: SBB silently mis-routes — its station
         resolver picks plausible Swiss/border alternatives and the
@@ -273,7 +285,7 @@ async def travel_sbb_journey(
     return "\n".join(lines).rstrip()
 
 
-async def travel_sbb_stationboard(
+async def travel_rail_ch_stationboard(
     station: str,
     limit: int = 10,
     kind: str = "departure",
@@ -322,7 +334,7 @@ async def travel_sbb_stationboard(
     return "\n".join(lines)
 
 
-async def travel_sbb_disruptions(
+async def travel_rail_ch_disruptions(
     station: str,
     window_minutes: int = 60,
     kind: str = "departure",

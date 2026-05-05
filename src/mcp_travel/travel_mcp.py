@@ -656,7 +656,7 @@ async def travel_ryanair_check(
 
 
 @mcp.tool()
-async def travel_sncf_journey(
+async def travel_rail_fr_journey(
     origin: str,
     destination: str,
     datetime_iso: str,
@@ -676,7 +676,7 @@ async def travel_sncf_journey(
 
 
 @mcp.tool()
-async def travel_ns_journey(
+async def travel_rail_nl_journey(
     origin: str,
     destination: str,
     datetime_iso: str,
@@ -713,7 +713,7 @@ async def travel_ns_journey(
 
 
 @mcp.tool()
-async def travel_sncb_journey(
+async def travel_rail_be_journey(
     origin: str,
     destination: str,
     datetime_iso: str,
@@ -751,7 +751,7 @@ async def travel_sncb_journey(
 
 
 @mcp.tool()
-async def travel_db_journey(
+async def travel_rail_de_journey(
     origin: str,
     destination: str,
     datetime_iso: str,
@@ -789,7 +789,7 @@ async def travel_db_journey(
 
 
 @mcp.tool()
-async def travel_italy_journey(
+async def travel_rail_it_journey(
     origin: str,
     destination: str,
     date: str,
@@ -806,10 +806,10 @@ async def travel_italy_journey(
 
     **Scope: Italy-INTERNAL only.** For Italy ↔ Switzerland cross-border
     journeys (Milano ↔ Zermatt / Brig / Lugano / Zürich / Bern), use
-    `travel_sbb_journey` instead — SBB's HAFAS planner handles the
+    `travel_rail_ch_journey` instead — SBB's HAFAS planner handles the
     cross-border lookup correctly with live data, while this tool's
     static table only carries domestic pairs. For live Italo prices on
-    domestic routes, use `travel_italy_prices_via_safari`.
+    domestic routes, use `travel_rail_it_prices_via_safari`.
 
     Args:
         origin: Italian city — 'milano', 'roma', 'firenze' (case-
@@ -831,7 +831,7 @@ async def travel_italy_journey(
 
 
 @mcp.tool()
-async def travel_italy_prices_via_safari(
+async def travel_rail_it_prices_via_safari(
     origin_city: str,
     destination_city: str,
     date: str,
@@ -968,7 +968,7 @@ async def travel_italy_prices_via_safari(
 
 
 @mcp.tool()
-async def travel_spain_journey(
+async def travel_rail_es_journey(
     origin: str,
     destination: str,
     date: str,
@@ -1005,7 +1005,7 @@ async def travel_spain_journey(
 
 
 @mcp.tool()
-async def travel_austria_journey(
+async def travel_rail_at_journey(
     origin: str,
     destination: str,
     date: str,
@@ -1031,7 +1031,7 @@ async def travel_austria_journey(
 
 
 @mcp.tool()
-async def travel_norway_journey(
+async def travel_rail_no_journey(
     origin: str,
     destination: str,
     datetime_iso: str,
@@ -1077,7 +1077,7 @@ async def travel_norway_journey(
 
 
 @mcp.tool()
-async def travel_sweden_journey(
+async def travel_rail_se_journey(
     origin: str,
     destination: str,
     datetime_iso: str,
@@ -1221,7 +1221,7 @@ async def travel_uber_estimate(
 
 
 @mcp.tool()
-async def travel_italy_status(
+async def travel_rail_it_status(
     station: str,
     datetime_iso: str | None = None,
     max_results: int = 20,
@@ -1242,7 +1242,7 @@ async def travel_italy_status(
     Each train carries: number, category (FR/IC/RV/etc.), destination,
     track, scheduled time, **delay in minutes**, departed/in-station
     flags. Italy's regional/branch-line trains DO appear here, unlike
-    in travel_italy_journey which is HSR-only.
+    in travel_rail_it_journey which is HSR-only.
     """
     try:
         result = await italy_departures(
@@ -2259,6 +2259,29 @@ from . import travel_sbb, travel_uk  # noqa: E402
 
 travel_sbb.register(mcp)
 travel_uk.register(mcp)
+
+
+# --- Stage 3a deprecation aliases (renamed 2026-05-05) -----------------
+# Old per-operator / per-country names registered as second tools so any
+# in-flight LLM session or script keeps working. New canonical names are
+# `travel_rail_<iso2>_*`. Aliases will be removed once callers have moved.
+def _alias(old_name: str, new_name: str, fn) -> None:
+    mcp.tool(
+        name=old_name,
+        description=f"DEPRECATED: renamed to `{new_name}`. Same signature; same behaviour. Will be removed in a future release.",
+    )(fn)
+
+_alias("travel_sncf_journey",              "travel_rail_fr_journey",            travel_rail_fr_journey)
+_alias("travel_ns_journey",                "travel_rail_nl_journey",            travel_rail_nl_journey)
+_alias("travel_sncb_journey",              "travel_rail_be_journey",            travel_rail_be_journey)
+_alias("travel_db_journey",                "travel_rail_de_journey",            travel_rail_de_journey)
+_alias("travel_italy_journey",             "travel_rail_it_journey",            travel_rail_it_journey)
+_alias("travel_italy_prices_via_safari",   "travel_rail_it_prices_via_safari",  travel_rail_it_prices_via_safari)
+_alias("travel_spain_journey",             "travel_rail_es_journey",            travel_rail_es_journey)
+_alias("travel_austria_journey",           "travel_rail_at_journey",            travel_rail_at_journey)
+_alias("travel_norway_journey",            "travel_rail_no_journey",            travel_rail_no_journey)
+_alias("travel_sweden_journey",            "travel_rail_se_journey",            travel_rail_se_journey)
+_alias("travel_italy_status",              "travel_rail_it_status",             travel_rail_it_status)
 
 
 if __name__ == "__main__":

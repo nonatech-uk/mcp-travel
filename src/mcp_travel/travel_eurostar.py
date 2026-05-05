@@ -351,6 +351,6 @@ async def check(
         result["note"] = (
             f"No direct Eurostar between {o['name']} and {d['name']}. "
             "Connect via Lille Europe or Paris Gare du Nord; consult "
-            "travel_sncf_journey for the onward TGV leg."
+            "travel_rail_fr_journey for the onward TGV leg."
         )
     return result

@@ -163,6 +163,14 @@ async def _flight_impl(
     return result
 
 
+def _ryanair_excluded(exclude_carriers: list[str] | None) -> bool:
+    """True if exclude_carriers explicitly drops Ryanair (FR / Ryanair)."""
+    if not exclude_carriers:
+        return False
+    needles = {"ryanair", "fr"}
+    return any((c or "").lower().strip() in needles for c in exclude_carriers)
+
+
 async def _ryanair_impl(
     ctx: dict,
     origin_iata: str,
@@ -226,6 +234,128 @@ async def _ryanair_impl(
     await cache_set(ctx["pool"], "ryanair_check", args, bucket, result, _TTL_FLIGHTS)
     result["cached"] = False
     return result
+
+
+async def _flight_check_impl(
+    ctx: dict,
+    origin_iata: str,
+    dest_iata: str,
+    date: str,
+    cabin: str,
+    adults: int,
+    teens: int = 0,
+    children: int = 0,
+    infants: int = 0,
+    include_sold_out: bool = False,
+    prefer_carriers: list[str] | None = None,
+    exclude_carriers: list[str] | None = None,
+) -> dict[str, Any]:
+    """Multi-source flight check: Duffel + Ryanair in parallel.
+
+    Mirrors the multi-source pattern used by travel_ferry_check: each
+    source returns its own option block with `live_data`, `data_sources`,
+    and `live_error`. Top-level `ok` is True if at least one source
+    returned data. Per-source caches in `_flight_impl` and `_ryanair_impl`
+    absorb repeat calls.
+
+    Ryanair is skipped when `exclude_carriers` explicitly drops it
+    (saves a 10-20s Playwright scrape on routes the caller won't take
+    anyway). Otherwise both sources are always attempted — the 6h
+    Ryanair cache absorbs the cost on routes Ryanair doesn't serve.
+    """
+    origin = origin_iata.upper().strip()
+    dest = dest_iata.upper().strip()
+
+    skip_ryanair = _ryanair_excluded(exclude_carriers)
+
+    duffel_coro = _flight_impl(
+        ctx, origin, dest, date, cabin, adults,
+        prefer_carriers=prefer_carriers,
+        exclude_carriers=exclude_carriers,
+    )
+    if skip_ryanair:
+        duffel_result = await duffel_coro
+        ryanair_result: dict[str, Any] | None = None
+    else:
+        ryanair_coro = _ryanair_impl(
+            ctx, origin, dest, date,
+            adults, teens, children, infants, include_sold_out,
+        )
+        duffel_result, ryanair_result = await asyncio.gather(duffel_coro, ryanair_coro)
+
+    options: list[dict[str, Any]] = []
+    data_sources: list[str] = []
+
+    # --- Duffel option ---
+    duffel_ok = bool(duffel_result.get("ok"))
+    duffel_opt: dict[str, Any] = {
+        "source": "duffel",
+        "live_data": duffel_ok,
+        "data_sources": ["duffel"],
+        "live_error": None if duffel_ok else duffel_result.get("error"),
+    }
+    if duffel_ok:
+        offers = duffel_result.get("offers", []) or []
+        prices = [o["total_amount"] for o in offers if o.get("total_amount") is not None]
+        duffel_opt.update({
+            "offers": offers,
+            "offer_count": len(offers),
+            "best_price": min(prices) if prices else None,
+            "currency": offers[0].get("total_currency") if offers else None,
+            "cabin": cabin,
+            "live": duffel_result.get("live", False),
+            "booking_deeplink": duffel_result.get("booking_deeplink"),
+        })
+        data_sources.append("duffel")
+    options.append(duffel_opt)
+
+    # --- Ryanair option ---
+    if skip_ryanair:
+        options.append({
+            "source": "ryanair",
+            "live_data": False,
+            "data_sources": [],
+            "live_error": None,
+            "skipped": True,
+            "skip_reason": "ryanair excluded by exclude_carriers",
+        })
+    else:
+        assert ryanair_result is not None  # gather always returns both
+        rya_ok = bool(ryanair_result.get("ok"))
+        rya_opt: dict[str, Any] = {
+            "source": "ryanair",
+            "live_data": rya_ok,
+            "data_sources": ["ryanair-live"] if rya_ok else [],
+            "live_error": None if rya_ok else ryanair_result.get("error"),
+        }
+        if rya_ok:
+            rya_opt.update({
+                "flights": ryanair_result.get("flights", []),
+                "flight_count": ryanair_result.get("flight_count", 0),
+                "best_price": ryanair_result.get("best_price"),
+                "currency": ryanair_result.get("currency"),
+                "note": "Ryanair prices are totals for all passengers combined, not per-person.",
+            })
+            data_sources.append("ryanair-live")
+        options.append(rya_opt)
+
+    return {
+        "ok": any(o.get("live_data") for o in options),
+        "mode": "flight",
+        "origin": origin,
+        "destination": dest,
+        "date": date,
+        "passengers": {
+            "adults": adults, "teens": teens,
+            "children": children, "infants": infants,
+        },
+        "cabin": cabin,
+        "prefer_carriers": prefer_carriers,
+        "exclude_carriers": exclude_carriers,
+        "data_sources": data_sources,
+        "options": options,
+        "as_of": datetime.utcnow().isoformat() + "Z",
+    }
 
 
 async def _sncf_impl(
@@ -400,35 +530,68 @@ async def travel_flight_check(
     date: str,
     cabin: str = "economy",
     adults: int = 2,
+    teens: int = 0,
+    children: int = 0,
+    infants: int = 0,
+    include_sold_out: bool = False,
     prefer_carriers: list[str] | None = None,
     exclude_carriers: list[str] | None = None,
 ) -> str:
-    """Find flight offers between two airports on a date.
+    """Find flight offers between two airports — Duffel + Ryanair fan-out.
+
+    Multi-source orchestration: Duffel covers most flagship + LCC carriers
+    (~250 airlines) with proper offer/booking flow. Ryanair is the
+    canonical Duffel hole — its inventory has to come from a separate
+    Playwright scrape. This tool runs both in parallel and returns one
+    merged response so callers don't have to remember to also call
+    `travel_ryanair_check` for Ryanair-served routes.
 
     Args:
         origin_iata: IATA code of origin airport (e.g. 'LGW', 'LHR').
         dest_iata: IATA code of destination airport (e.g. 'NCE', 'GVA').
         date: Departure date in ISO format (YYYY-MM-DD).
-        cabin: Cabin class — 'economy', 'premium_economy', 'business', 'first'.
-        adults: Number of adult passengers (default 2).
-        prefer_carriers: Soft preference — matching offers move to top of
-            results, non-matching kept as fallback below. Match is by IATA
-            code OR case-insensitive substring on carrier name; checks
-            both `owner` and per-segment `marketing_carrier`. E.g.
-            ['BA','AY'] for British Airways or Finnair, ['easyJet'] for
-            substring match. Affects ranking order, not which offers are
-            returned.
-        exclude_carriers: Hard exclusion — drops matching offers entirely.
-            Same matching shape. E.g. ['Ryanair','Wizz'] to avoid budget
-            carriers, ['U2','FR'] by IATA code.
+        cabin: Duffel cabin — 'economy', 'premium_economy', 'business',
+            'first'. Ryanair has no cabin classes; the value is ignored
+            for the Ryanair leg.
+        adults: Adult passenger count. Passed verbatim to both sources.
+            Default 2.
+        teens: Teen passengers (Ryanair 12-15). Default 0. Ryanair-only —
+            Duffel doesn't model the teen band.
+        children: Child passengers (Ryanair 2-11). Default 0. Ryanair-only.
+        infants: Infant passengers (Ryanair under-2, on lap). Default 0.
+            Ryanair-only.
+        include_sold_out: Include sold-out Ryanair flights in the result.
+            Default False. Ryanair-only.
+        prefer_carriers: Duffel soft preference — matching offers move to
+            top of Duffel results. Match is by IATA code OR case-insensitive
+            substring on carrier name; checks both `owner` and per-segment
+            `marketing_carrier`. E.g. ['BA','AY'] for British Airways or
+            Finnair, ['easyJet'] for substring match. Affects Duffel
+            ranking, not which offers are returned.
+        exclude_carriers: Duffel hard exclusion — drops matching offers
+            entirely. Same matching shape. E.g. ['Ryanair','Wizz'] to
+            avoid budget carriers. **Special case**: if 'Ryanair' or 'FR'
+            appears here, the Ryanair fan-out is also skipped (saves a
+            10-20s scrape).
 
-    Returns up to 5 offers ranked by price (with preferred carriers
-    bubbled to the top) plus a Skyscanner deeplink as a booking fallback.
-    Uses Duffel test mode unless DUFFEL_MODE=live.
+    Returns a multi-source response shaped like `travel_ferry_check`:
+        {
+          ok: true if at least one source returned data,
+          options: [
+            {source: "duffel",  live_data, offers[], best_price, ...},
+            {source: "ryanair", live_data, flights[], best_price, ...}
+          ]
+        }
+    Currencies may differ per source (typically GBP/EUR for Duffel,
+    EUR/GBP for Ryanair — Stage 1 will normalise to GBP). Per-source
+    failures surface as `live_error` strings with the option block
+    still present.
     """
     return json.dumps(
-        await _flight_impl(
+        await _flight_check_impl(
             _ctx(), origin_iata, dest_iata, date, cabin, adults,
+            teens=teens, children=children, infants=infants,
+            include_sold_out=include_sold_out,
             prefer_carriers=prefer_carriers,
             exclude_carriers=exclude_carriers,
         ),
@@ -447,12 +610,13 @@ async def travel_ryanair_check(
     infants: int = 0,
     include_sold_out: bool = False,
 ) -> str:
-    """Find Ryanair flights between two airports on a date.
+    """**Debug escape hatch** — `travel_flight_check` already includes Ryanair.
 
-    Ryanair is the canonical hole in Duffel's inventory — `travel_flight_check`
-    will never surface FR flights. Use this tool to fill the gap when a
-    Ryanair-served route is in scope (typically intra-EU + UK↔Ireland +
-    UK↔Spain/Portugal/Italy).
+    Prefer `travel_flight_check`, which fans out to Duffel + Ryanair in
+    parallel and returns a unified multi-source response. This standalone
+    Ryanair-only tool is retained for debugging — testing the Ryanair
+    sidecar in isolation, bypassing the merged-result envelope, or
+    inspecting raw Ryanair flight rows without the option-block wrapping.
 
     Args:
         origin_iata: IATA code of origin airport (e.g. 'DUB', 'STN', 'BCN').

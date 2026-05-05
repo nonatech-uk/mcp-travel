@@ -113,7 +113,7 @@ async def stationboard(
         f"{_base()}/stops/{sid}/{endpoint}",
         params={"results": limit, "duration": 60},
         headers={"User-Agent": DB_UA},
-        timeout=20.0,
+        timeout=45.0,
     )
     if resp.status_code >= 400:
         raise DBError(f"db-rest /{endpoint} {resp.status_code}: {resp.text[:300]}")

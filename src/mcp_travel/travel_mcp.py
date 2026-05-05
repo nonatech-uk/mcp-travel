@@ -14,7 +14,7 @@ see /root/.claude/plans/brief-mcp-travel-steady-fountain.md.
 import asyncio
 import json
 import os
-from datetime import date as date_type, datetime
+from datetime import date as date_type, datetime, timedelta
 from typing import Any
 
 import asyncpg
@@ -2440,6 +2440,146 @@ async def travel_rail_se_stationboard(
     """
     res = await sweden_stationboard(_ctx()["client"], station, kind=kind, limit=limit)
     return json.dumps({"ok": True, **res}, indent=2)
+
+
+# --- Stage 3d disruptions tools (added 2026-05-05) ---------------------
+# Station-centric model — same as UK + CH: pull a generous stationboard,
+# filter to entries with a non-zero delay or a cancellation flag,
+# optionally bound to the next N minutes.
+
+def _row_is_disrupted(row: dict[str, Any]) -> tuple[bool, str | None]:
+    """Returns (disrupted, marker). Marker is a short string like
+    '+5min' or 'cancelled' suitable for display."""
+    if row.get("cancelled") or row.get("canceled"):
+        return True, "cancelled"
+    delay = row.get("delay_seconds")
+    if isinstance(delay, (int, float)) and delay > 0:
+        mins = int(delay) // 60
+        if mins >= 1:
+            return True, f"+{mins}min"
+    # Operators sometimes report delay only via a planned vs actual gap.
+    planned = row.get("planned_time")
+    actual = row.get("time")
+    if planned and actual and planned != actual:
+        try:
+            p = datetime.fromisoformat(planned)
+            a = datetime.fromisoformat(actual)
+            gap = int((a - p).total_seconds() // 60)
+            if gap >= 1:
+                return True, f"+{gap}min"
+        except ValueError:
+            pass
+    return False, None
+
+
+def _filter_disrupted(
+    rows: list[dict[str, Any]], window_minutes: int,
+) -> list[dict[str, Any]]:
+    cutoff = datetime.now().astimezone() + timedelta(minutes=window_minutes)
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        # Time-window check (drop rows past the cutoff)
+        ts_str = r.get("time") or r.get("planned_time")
+        if ts_str:
+            try:
+                ts = datetime.fromisoformat(ts_str)
+                if ts.tzinfo is None:
+                    ts = ts.astimezone()
+                if ts > cutoff:
+                    continue
+            except ValueError:
+                pass
+        ok, marker = _row_is_disrupted(r)
+        if ok:
+            out.append({**r, "disruption": marker})
+    return out
+
+
+async def _disruptions_payload(
+    board_fn, station: str, window_minutes: int, kind: str,
+) -> dict[str, Any]:
+    res = await board_fn(_ctx()["client"], station, kind=kind, limit=40)
+    rows = _filter_disrupted(res.get("rows", []), window_minutes)
+    return {
+        "ok": True,
+        "station": res.get("station"),
+        "kind": kind,
+        "window_minutes": window_minutes,
+        "disrupted_count": len(rows),
+        "disrupted": rows,
+    }
+
+
+@mcp.tool()
+async def travel_rail_fr_disruptions(
+    station: str, window_minutes: int = 60, kind: str = "departure",
+) -> str:
+    """Report delays and cancellations at an SNCF stop_area in the next
+    N minutes. Filters the live Navitia stationboard."""
+    return json.dumps(
+        await _disruptions_payload(sncf_stationboard, station, window_minutes, kind),
+        indent=2,
+    )
+
+
+@mcp.tool()
+async def travel_rail_nl_disruptions(
+    station: str, window_minutes: int = 60, kind: str = "departure",
+) -> str:
+    """Report delays and cancellations at an NS station in the next
+    N minutes. Filters the live NS stationboard."""
+    return json.dumps(
+        await _disruptions_payload(ns_stationboard, station, window_minutes, kind),
+        indent=2,
+    )
+
+
+@mcp.tool()
+async def travel_rail_be_disruptions(
+    station: str, window_minutes: int = 60, kind: str = "departure",
+) -> str:
+    """Report delays and cancellations at an SNCB / NMBS station in the
+    next N minutes. Filters the live iRail liveboard."""
+    return json.dumps(
+        await _disruptions_payload(sncb_stationboard, station, window_minutes, kind),
+        indent=2,
+    )
+
+
+@mcp.tool()
+async def travel_rail_de_disruptions(
+    station: str, window_minutes: int = 60, kind: str = "departure",
+) -> str:
+    """Report delays and cancellations at a DB station in the next
+    N minutes. Filters the live db-rest stationboard."""
+    return json.dumps(
+        await _disruptions_payload(db_stationboard, station, window_minutes, kind),
+        indent=2,
+    )
+
+
+@mcp.tool()
+async def travel_rail_no_disruptions(
+    station: str, window_minutes: int = 60, kind: str = "departure",
+) -> str:
+    """Report delays and cancellations at an Entur stop in the next
+    N minutes. Filters the live stationboard."""
+    return json.dumps(
+        await _disruptions_payload(norway_stationboard, station, window_minutes, kind),
+        indent=2,
+    )
+
+
+@mcp.tool()
+async def travel_rail_se_disruptions(
+    station: str, window_minutes: int = 60, kind: str = "departure",
+) -> str:
+    """Report delays and cancellations at a Swedish ResRobot station in
+    the next N minutes. Filters the live stationboard."""
+    return json.dumps(
+        await _disruptions_payload(sweden_stationboard, station, window_minutes, kind),
+        indent=2,
+    )
 
 
 # --- Stage 3a deprecation aliases (renamed 2026-05-05) -----------------

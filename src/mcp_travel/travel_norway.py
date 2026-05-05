@@ -76,33 +76,15 @@ async def find_stop(
 
 
 async def resolve_stop(client: httpx.AsyncClient, query: str) -> dict[str, Any] | None:
-    """Use Entur geocoder to resolve free text → NSR:StopPlace:NNN id."""
-    resp = await client.get(
-        ENTUR_GEOCODER,
-        params={"text": query, "size": 5, "layers": "venue"},
-        headers={"User-Agent": ENTUR_UA, "ET-Client-Name": "nonatech-mcp-travel"},
-        timeout=20.0,
-    )
-    if resp.status_code >= 400:
-        raise NorwayError(f"entur geocoder {resp.status_code}: {resp.text[:300]}")
-    feats = resp.json().get("features") or []
-    # Prefer railStation / stopPlace category
-    for f in feats:
-        cats = (f.get("properties") or {}).get("category") or []
-        if any(c in ("railStation", "onstreetTram", "metroStation") for c in cats):
-            return {
-                "id": (f.get("properties") or {}).get("id"),
-                "name": (f.get("properties") or {}).get("label"),
-                "category": cats,
-            }
-    if feats:
-        f = feats[0]
-        return {
-            "id": (f.get("properties") or {}).get("id"),
-            "name": (f.get("properties") or {}).get("label"),
-            "category": (f.get("properties") or {}).get("category"),
-        }
-    return None
+    """Use Entur geocoder to resolve free text → NSR:StopPlace:NNN id.
+
+    Delegates to find_stop so the same two-tier rail/metro > onstreetTram >
+    other preference applies. Without this, "Bergen" picked the airport
+    bus stop (categories include onstreetTram + airport) over Bergen
+    stasjon (railStation + bus). See find_stop for the tier breakdown.
+    """
+    candidates = await find_stop(client, query, limit=1)
+    return candidates[0] if candidates else None
 
 
 _TRIP_QUERY = """

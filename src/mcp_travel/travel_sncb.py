@@ -177,6 +177,93 @@ def _summarise_via(via: dict) -> dict:
     }
 
 
+def _vehicle_summary(vehicle: dict) -> tuple[str | None, str | None, str | None]:
+    """Pull (category, train_number, line_name) out of an iRail
+    vehicleinfo. `shortname` is the user-facing form ('IC 1832');
+    `name` is the wire-format ID ('BE.NMBS.IC1832')."""
+    short = (vehicle or {}).get("shortname") or ""
+    name = (vehicle or {}).get("name") or ""
+    if short:
+        parts = short.split(None, 1)
+        cat = parts[0] if parts else None
+        num = parts[1] if len(parts) > 1 else None
+        return cat, num, short
+    if name:
+        return None, name, name
+    return None, None, None
+
+
+def _build_legs(conn: dict) -> list[dict]:
+    """Synthesise per-leg breakdown from iRail's connection-level data.
+
+    iRail returns top-level departure/arrival + a list of `vias`
+    (interchange points). Per-leg detail is implicit between the
+    departure → first via, via → via, and last via → arrival. Each
+    via's `vehicleinfo` is the train you board AT that via (i.e. the
+    next leg's train). Output matches the canonical leg shape — see
+    README §Leg shape (canonical).
+    """
+    dep = conn.get("departure") or {}
+    arr = conn.get("arrival") or {}
+    vias_block = conn.get("vias") or {}
+    vias = vias_block.get("via", []) if isinstance(vias_block, dict) else []
+    if vias is None:
+        vias = []
+    if not isinstance(vias, list):
+        vias = [vias]
+
+    legs: list[dict] = []
+
+    # Leg 0: from departure to first via (or to arrival if direct).
+    if vias:
+        next_arr_block = vias[0].get("arrival") or {}
+        next_station = vias[0].get("station")
+    else:
+        next_arr_block = arr
+        next_station = arr.get("station")
+    cat, num, line = _vehicle_summary(dep.get("vehicleinfo"))
+    legs.append({
+        "from": dep.get("station"),
+        "to": next_station,
+        "from_platform": dep.get("platform"),
+        "to_platform": next_arr_block.get("platform"),
+        "depart": _epoch_to_iso(dep.get("time")),
+        "arrive": _epoch_to_iso(next_arr_block.get("time")),
+        "duration_minutes": None,
+        "operator": "SNCB",
+        "category": cat,
+        "train_number": num,
+        "line_name": line,
+        "is_walking": False,
+    })
+
+    # Subsequent legs — one per via, using the via's outbound vehicleinfo.
+    for i, via in enumerate(vias):
+        via_dep = via.get("departure") or {}
+        if i + 1 < len(vias):
+            next_arr_block = vias[i + 1].get("arrival") or {}
+            next_station = vias[i + 1].get("station")
+        else:
+            next_arr_block = arr
+            next_station = arr.get("station")
+        cat, num, line = _vehicle_summary(via.get("vehicleinfo"))
+        legs.append({
+            "from": via.get("station"),
+            "to": next_station,
+            "from_platform": via_dep.get("platform"),
+            "to_platform": next_arr_block.get("platform"),
+            "depart": _epoch_to_iso(via_dep.get("time")),
+            "arrive": _epoch_to_iso(next_arr_block.get("time")),
+            "duration_minutes": None,
+            "operator": "SNCB",
+            "category": cat,
+            "train_number": num,
+            "line_name": line,
+            "is_walking": False,
+        })
+    return legs
+
+
 def _summarise_connection(conn: dict) -> dict:
     dep = conn.get("departure") or {}
     arr = conn.get("arrival") or {}
@@ -197,6 +284,7 @@ def _summarise_connection(conn: dict) -> dict:
         "duration_minutes": int(conn.get("duration") or 0) // 60,
         "transfers": len(vias),
         "vias": [_summarise_via(v) for v in vias],
+        "legs": _build_legs(conn),
         "operator": (dep.get("vehicleinfo") or {}).get("type"),  # IC / S / etc.
     }
 

@@ -187,28 +187,34 @@ async def stationboard(
 
 
 def _summarise_section(s: dict) -> dict:
+    """Canonical leg shape — see README §Leg shape (canonical).
+
+    SNCF Navitia uses 'sections' instead of 'legs' and labels walks/
+    transfers as type='street_network'/'transfer'/'waiting'. The
+    is_walking flag captures all non-public-transport sections so
+    callers can ignore them in change-counting.
+    """
     kind = s.get("type")
+    di = s.get("display_informations") or {}
     out: dict[str, Any] = {
-        "type": kind,
+        "from": (s.get("from") or {}).get("name") if s.get("from") else None,
+        "to": (s.get("to") or {}).get("name") if s.get("to") else None,
+        "from_platform": None,    # Navitia /journeys doesn't expose platforms
+        "to_platform": None,
         "depart": s.get("departure_date_time"),
         "arrive": s.get("arrival_date_time"),
         "duration_minutes": (s.get("duration") or 0) // 60,
+        "type": kind,             # public_transport / street_network / transfer / waiting
+        "is_walking": kind != "public_transport",
     }
-    di = s.get("display_informations") or {}
     if kind == "public_transport":
-        out["mode"] = di.get("commercial_mode") or di.get("network")
         out["operator"] = di.get("network")
+        out["category"] = di.get("commercial_mode") or di.get("network")
+        out["train_number"] = di.get("trip_short_name") or di.get("headsign")
+        out["line_name"] = di.get("label") or di.get("commercial_mode")
         out["headsign"] = di.get("headsign")
-        out["train_id"] = di.get("trip_short_name") or di.get("headsign")
-        out["from"] = (s.get("from") or {}).get("name")
-        out["to"] = (s.get("to") or {}).get("name")
         sdt = s.get("stop_date_times") or []
         out["stops"] = max(len(sdt) - 2, 0)
-    else:
-        if s.get("from"):
-            out["from"] = s["from"].get("name")
-        if s.get("to"):
-            out["to"] = s["to"].get("name")
     return out
 
 

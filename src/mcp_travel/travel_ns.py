@@ -169,20 +169,23 @@ async def stationboard(
 
 
 def _summarise_leg(leg: dict) -> dict:
+    """Canonical leg shape — see README §Leg shape (canonical)."""
     o = leg.get("origin") or {}
     d = leg.get("destination") or {}
     product = leg.get("product") or {}
     return {
         "from": o.get("name"),
-        "from_track": o.get("plannedTrack") or o.get("actualTrack"),
+        "from_platform": o.get("plannedTrack") or o.get("actualTrack"),
         "to": d.get("name"),
-        "to_track": d.get("plannedTrack") or d.get("actualTrack"),
+        "to_platform": d.get("plannedTrack") or d.get("actualTrack"),
         "depart": o.get("plannedDateTime"),
         "arrive": d.get("plannedDateTime"),
         "duration_minutes": leg.get("plannedDurationInMinutes") or 0,
         "operator": product.get("operatorName"),
         "category": product.get("categoryCode") or product.get("longCategoryName"),
         "train_number": product.get("number"),
+        "line_name": product.get("longCategoryName"),
+        "is_walking": False,
         "cancelled": leg.get("cancelled", False),
     }
 

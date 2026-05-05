@@ -206,29 +206,42 @@ async def stationboard(
 
 
 def _summarise_pattern(p: dict) -> dict:
+    """Canonical leg shape — see README §Leg shape (canonical).
+
+    Entur's `line.publicCode` (e.g. 'R23', 'FLY1') maps onto our
+    `train_number` field — it's the line/service code passengers use.
+    `line.name` is the descriptive name (e.g. 'Oslo S - Asker').
+    """
     legs = p.get("legs") or []
     pt_legs = [l for l in legs if l.get("mode") and l["mode"] != "foot"]
+
+    def _shape(l: dict) -> dict:
+        line = l.get("line") or {}
+        from_quay = (l.get("fromEstimatedCall") or {}).get("quay") or {}
+        to_quay = (l.get("toEstimatedCall") or {}).get("quay") or {}
+        return {
+            "from": (l.get("fromPlace") or {}).get("name"),
+            "to": (l.get("toPlace") or {}).get("name"),
+            "from_platform": from_quay.get("publicCode"),
+            "to_platform": to_quay.get("publicCode"),
+            "depart": l.get("expectedStartTime"),
+            "arrive": l.get("expectedEndTime"),
+            "duration_minutes": (l.get("duration") or 0) // 60,
+            "operator": ((line.get("operator")) or {}).get("name"),
+            "category": l.get("mode"),                # rail / bus / water / foot
+            "train_number": line.get("publicCode"),    # 'R23', 'FLY1'
+            "line_name": line.get("name"),
+            "is_walking": l.get("mode") == "foot",
+            "distance_m": l.get("distance"),
+        }
+
     return {
         "depart": p.get("expectedStartTime"),
         "arrive": p.get("expectedEndTime"),
         "duration_seconds": p.get("duration") or 0,
         "duration_minutes": (p.get("duration") or 0) // 60,
         "transfers": max(len(pt_legs) - 1, 0),
-        "legs": [
-            {
-                "mode": l.get("mode"),
-                "from": (l.get("fromPlace") or {}).get("name"),
-                "to": (l.get("toPlace") or {}).get("name"),
-                "depart": l.get("expectedStartTime"),
-                "arrive": l.get("expectedEndTime"),
-                "duration_minutes": (l.get("duration") or 0) // 60,
-                "line_name": (l.get("line") or {}).get("name"),
-                "line_code": (l.get("line") or {}).get("publicCode"),
-                "operator": ((l.get("line") or {}).get("operator") or {}).get("name"),
-                "distance_m": l.get("distance"),
-            }
-            for l in legs
-        ],
+        "legs": [_shape(l) for l in legs],
     }
 
 

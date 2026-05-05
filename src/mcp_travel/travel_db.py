@@ -78,17 +78,32 @@ async def resolve_station(client: httpx.AsyncClient, query: str) -> dict[str, An
 
 
 def _summarise_leg(leg: dict) -> dict:
+    """Canonical leg shape — see README §Leg shape (canonical).
+
+    db-rest's `line.name` typically combines category + train number
+    ('ICE 41', 'IC 2363'). We split those out so `category` and
+    `train_number` are clean separate fields.
+    """
     line = leg.get("line") or {}
+    name = line.get("name") or ""
+    # Try to split "ICE 41" → ("ICE", "41"); fall back to whole string as line_name
+    train_number = None
+    if " " in name:
+        head, tail = name.rsplit(" ", 1)
+        if tail.replace("-", "").replace("/", "").isalnum():
+            train_number = tail
     return {
         "from": (leg.get("origin") or {}).get("name"),
         "to": (leg.get("destination") or {}).get("name"),
+        "from_platform": leg.get("plannedDeparturePlatform"),
+        "to_platform": leg.get("plannedArrivalPlatform"),
         "depart": leg.get("plannedDeparture"),
         "arrive": leg.get("plannedArrival"),
-        "depart_platform": leg.get("plannedDeparturePlatform"),
-        "arrive_platform": leg.get("plannedArrivalPlatform"),
+        "duration_minutes": None,  # db-rest doesn't expose per-leg duration
         "operator": (line.get("operator") or {}).get("name"),
-        "line_name": line.get("name"),
-        "product": line.get("product"),    # ICE / IC / RE / S / U / Bus etc.
+        "category": line.get("product"),    # ICE / IC / RE / S / U / Bus etc.
+        "train_number": train_number,
+        "line_name": name,
         "is_walking": leg.get("walking", False),
     }
 

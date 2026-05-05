@@ -465,11 +465,24 @@ async def _tapi_journey(
         lines.append(f"{i}. {dep_t} {from_crs}  →  {arr_t} {to_crs}   ({duration}, {change_str})")
         if modes:
             lines.append(f"   {modes}")
-        for p in parts[:-1]:
-            to_point = p.get("to_point_name") or p.get("destination", "")
-            arr = p.get("arrival_time") or ""
-            if to_point:
-                lines.append(f"     change @ {to_point} ({arr})")
+        # Per-leg breakdown — each route_part is a single train (or walk)
+        # segment. Surfacing the full breakdown lets the LLM tell the
+        # user which trains to catch and where to change. (Same pattern
+        # as travel_rail_ch_journey.)
+        for p in parts:
+            leg_dep = p.get("departure_time") or ""
+            leg_arr = p.get("arrival_time") or ""
+            leg_from = p.get("from_point_name") or p.get("from_point", "")
+            leg_to = p.get("to_point_name") or p.get("to_point", "")
+            leg_mode = (p.get("mode") or "").upper()
+            leg_svc = p.get("service") or ""
+            leg_op = p.get("operator_name") or p.get("operator") or ""
+            svc_str = f"{leg_mode} {leg_svc}".strip() if leg_svc else (leg_mode or "?")
+            op_str = f" [{leg_op}]" if leg_op else ""
+            lines.append(
+                f"     • {leg_dep} {leg_from}  →  {leg_arr} {leg_to}   "
+                f"{svc_str}{op_str}".rstrip()
+            )
         lines.append("")
     return "\n".join(lines).rstrip()
 

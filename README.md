@@ -216,6 +216,36 @@ dict to a total. For band-aware tools (Eurostar, Ryanair) per-band
 counts are passed through. Eurostar treats teens as adults inside
 the wrapper.
 
+### Leg shape (canonical)
+
+Rail journey tools that return JSON (`travel_rail_<iso2>_journey` for
+NL/BE/DE/FR/NO/SE) emit a per-leg breakdown under `legs[]` (or
+`sections[]` for SNCF, which Navitia calls them). Every leg has the
+same keys regardless of the upstream API:
+
+```
+{
+  "from": "Brussels-South",          // origin station name
+  "to":   "Antwerp-Central",
+  "from_platform": "5",              // string or null
+  "to_platform":   "13",
+  "depart": "2026-06-15T09:30:00",   // ISO datetime
+  "arrive": "2026-06-15T10:08:00",
+  "duration_minutes": 38,             // null if upstream doesn't expose
+  "operator": "SNCB",                 // carrier name
+  "category": "IC",                   // service tier (IC/ICE/IR/RE/R/...)
+  "train_number": "1832",             // specific train number
+  "line_name": "IC 1832",             // descriptive name where applicable
+  "is_walking": false                 // true for walk transfers between stops
+}
+```
+
+Operator-specific extras (Navitia's `headsign`, Entur's `distance_m`,
+SNCF's `stops`, NS's `cancelled`, etc.) live alongside the canonical
+fields. Text-output rail tools (`travel_rail_ch_journey`,
+`travel_rail_gb_journey`) emit the same data as indented bullet lines
+under each connection summary instead of a JSON `legs[]` array.
+
 ### Datetime spec
 
 Rail journey tools (`travel_rail_<iso>_journey`) historically took

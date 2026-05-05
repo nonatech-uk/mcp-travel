@@ -159,6 +159,11 @@ async def stationboard(
 
 
 def _summarise_leg(leg: dict) -> dict:
+    """Canonical leg shape — see README §Leg shape (canonical).
+
+    ResRobot ships date and time as separate fields; we compose them
+    into ISO datetime to match every other rail wrapper.
+    """
     o = leg.get("Origin") or {}
     d = leg.get("Destination") or {}
     prod_block = leg.get("Product")
@@ -168,20 +173,24 @@ def _summarise_leg(leg: dict) -> dict:
         prod = prod_block
     else:
         prod = {}
-    notes_block = leg.get("Notes") or {}
+
+    def _iso(date: str | None, time: str | None) -> str | None:
+        if not date or not time:
+            return None
+        return f"{date}T{time}"
+
     return {
         "from": o.get("name"),
-        "from_time": o.get("time"),
-        "from_date": o.get("date"),
-        "from_track": o.get("track"),
         "to": d.get("name"),
-        "to_time": d.get("time"),
-        "to_date": d.get("date"),
-        "to_track": d.get("track"),
+        "from_platform": o.get("track"),
+        "to_platform": d.get("track"),
+        "depart": _iso(o.get("date"), o.get("time")),
+        "arrive": _iso(d.get("date"), d.get("time")),
+        "duration_minutes": None,  # ResRobot doesn't expose per-leg duration
         "operator": prod.get("operator") or prod.get("operatorCode"),
         "category": prod.get("catOut") or prod.get("catIn") or prod.get("catOutS"),
+        "train_number": prod.get("num") or prod.get("displayNumber"),
         "line_name": prod.get("name") or leg.get("name"),
-        "line_number": prod.get("num") or prod.get("displayNumber"),
         "is_walking": leg.get("type") == "WALK",
     }
 

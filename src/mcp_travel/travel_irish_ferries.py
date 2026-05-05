@@ -53,6 +53,20 @@ def _key(s: str) -> str:
     return s.strip().lower()
 
 
+# Port name aliases used when filtering scraper output. The scraper returns
+# the port names exactly as Irish Ferries renders them ("Pembroke Dock",
+# "Holyhead", ...), but callers may pass "pembroke" — fold both to a single
+# canonical form before comparing.
+_PORT_ALIASES: dict[str, str] = {
+    "pembroke dock": "pembroke",
+}
+
+
+def _canon_port(s: str) -> str:
+    k = _key(s)
+    return _PORT_ALIASES.get(k, k)
+
+
 def is_known_route(origin: str, destination: str) -> bool:
     """True if the (origin, destination) port pair maps to an Irish Ferries route."""
     return (_key(origin), _key(destination)) in _PORT_PAIR_TO_ROUTE
@@ -68,19 +82,42 @@ def resolve_route(origin: str, destination: str) -> str:
     return code
 
 
-# Map our static-table vehicle vocabulary to Irish Ferries' transport codes.
-def _map_transport(vehicle: str) -> str:
+# Map our static-table vehicle vocabulary → (transport, vehicle_height) pair
+# accepted by Stu's irish_ferries.py.
+def _map_transport(vehicle: str) -> tuple[str, str]:
     v = vehicle.lower()
-    if v in ("car", "high-vehicle", "caravan-trailer"):
-        return "car"
+    # Tall cars + caravans flow through as cars with height adjustments.
+    if v == "car":
+        return "car", "standard"
+    if v == "high-vehicle":
+        return "car", "high"
+    if v == "caravan-trailer":
+        # No first-class caravan-trailer category in the form; tall car is closest.
+        return "car", "high"
     if v == "motorhome":
-        return "motorhome"
+        return "motorhome", "standard"
     if v == "motorcycle":
-        return "motorcycle"
+        return "motorcycle", "standard"
     if v == "van":
-        return "van"
-    # foot / bicycle / unknown → foot pricing
-    return "foot"
+        return "van", "standard"
+    # foot / bicycle / unknown → foot pricing (no dimensions field).
+    return "foot", "standard"
+
+
+def _normalize_sailing(s: dict[str, Any]) -> dict[str, Any]:
+    """Map Stu's reference field names → the unified key names used by the
+    other operator modules (DFDS, Brittany, Stena, P&O)."""
+    return {
+        "departure_port": s.get("departure_port", ""),
+        "arrival_port":   s.get("arrival_port", ""),
+        "departure":      s.get("departure_time", s.get("departure", "")),
+        "arrival":        s.get("arrival_time",   s.get("arrival", "")),
+        "ship":           s.get("vessel",         s.get("ship", "")),
+        "available":      s.get("available", True),
+        "prices":         s.get("prices", {}),
+        "best_price":     s.get("best_price"),
+        "currency":       s.get("currency"),
+    }
 
 
 async def get_sailings(
@@ -100,7 +137,7 @@ async def get_sailings(
          currency ('GBP' or 'EUR')}
     """
     route_code = resolve_route(origin, destination)
-    transport = _map_transport(vehicle)
+    transport, vehicle_height = _map_transport(vehicle)
 
     body = {
         "date": date,
@@ -108,6 +145,7 @@ async def get_sailings(
         "adults": adults,
         "children": children,
         "transport": transport,
+        "vehicle_height": vehicle_height,
     }
     try:
         resp = await client.post(
@@ -127,4 +165,15 @@ async def get_sailings(
         raise IrishFerriesError(f"scraper {resp.status_code}: {detail}")
 
     payload = resp.json()
-    return payload.get("sailings", [])
+    sailings = [_normalize_sailing(s) for s in payload.get("sailings", [])]
+
+    # Irish Ferries route codes (IRLUK / UKIRL) cover BOTH port-pairs on each
+    # corridor — a Dublin→Holyhead query also returns Rosslare→Pembroke
+    # sailings. Filter back down to the requested origin/destination.
+    want_dep = _canon_port(origin)
+    want_arr = _canon_port(destination)
+    return [
+        s for s in sailings
+        if _canon_port(s.get("departure_port", "")) == want_dep
+        and _canon_port(s.get("arrival_port", "")) == want_arr
+    ]

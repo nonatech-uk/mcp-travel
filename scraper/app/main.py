@@ -36,13 +36,18 @@ class IrishFerriesRequest(BaseModel):
     adults: int = 1
     children: int = 0
     transport: str = "foot"
+    vehicle_height: str = Field(
+        "standard",
+        description="standard / medium / high / long, or raw code (ACRV, BCRV, BDMV, ...). "
+                    "Only used for car / motorhome / van.",
+    )
 
 
 @app.post("/irish-ferries/sailings")
 def irish_ferries_sailings(req: IrishFerriesRequest) -> dict[str, Any]:
     log.info(
-        "irish-ferries/sailings date=%s route=%s adults=%d children=%d transport=%s",
-        req.date, req.route, req.adults, req.children, req.transport,
+        "irish-ferries/sailings date=%s route=%s adults=%d children=%d transport=%s height=%s",
+        req.date, req.route, req.adults, req.children, req.transport, req.vehicle_height,
     )
     try:
         sailings = irish_ferries.get_sailings(
@@ -51,32 +56,44 @@ def irish_ferries_sailings(req: IrishFerriesRequest) -> dict[str, Any]:
             adults=req.adults,
             children=req.children,
             transport=req.transport,
+            vehicle_height=req.vehicle_height,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except RuntimeError as e:
-        raise HTTPException(status_code=502, detail=f"scraper failed: {e}")
+    except Exception as e:
+        # Catch-all (Playwright TimeoutError, parser errors, etc.) so the
+        # caller sees the actual failure mode instead of a generic 500.
+        log.exception("irish-ferries/sailings failed")
+        raise HTTPException(
+            status_code=502,
+            detail=f"scraper failed: {type(e).__name__}: {e}",
+        )
     return {"sailings": sailings}
 
 
 @app.post("/irish-ferries/week")
 def irish_ferries_week(req: IrishFerriesRequest) -> dict[str, Any]:
     log.info(
-        "irish-ferries/week start=%s route=%s adults=%d children=%d transport=%s",
-        req.date, req.route, req.adults, req.children, req.transport,
+        "irish-ferries/week start=%s route=%s adults=%d children=%d transport=%s height=%s",
+        req.date, req.route, req.adults, req.children, req.transport, req.vehicle_height,
     )
     try:
-        by_date = irish_ferries.get_sailings_week(
+        by_date = irish_ferries.find_sailings_week(
             start_date=req.date,
             route=req.route,
             adults=req.adults,
             children=req.children,
             transport=req.transport,
+            vehicle_height=req.vehicle_height,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except RuntimeError as e:
-        raise HTTPException(status_code=502, detail=f"scraper failed: {e}")
+    except Exception as e:
+        log.exception("irish-ferries/week failed")
+        raise HTTPException(
+            status_code=502,
+            detail=f"scraper failed: {type(e).__name__}: {e}",
+        )
     return {"by_date": by_date}
 
 
@@ -111,8 +128,12 @@ def ryanair_flights(req: RyanairRequest) -> dict[str, Any]:
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except RuntimeError as e:
-        raise HTTPException(status_code=502, detail=f"scraper failed: {e}")
+    except Exception as e:
+        log.exception("ryanair/flights failed")
+        raise HTTPException(
+            status_code=502,
+            detail=f"scraper failed: {type(e).__name__}: {e}",
+        )
     return {"flights": flights}
 
 

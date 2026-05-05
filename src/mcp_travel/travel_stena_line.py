@@ -21,8 +21,9 @@ Routes (24 directional, 12 bidirectional pairs):
                Karlskrona↔Gdynia
 """
 
-from datetime import date as _date
+from datetime import date as _date, datetime
 from typing import Any, Literal
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -95,6 +96,64 @@ _VALID_ROUTES: set[str] = {
     "GRHA", "HAGR",   # Grenaa ↔ Halmstad
     "KAGD", "GDKA",   # Karlskrona ↔ Gdynia
 }
+
+# IANA timezone for each Stena port code. Used to fix the GraphQL
+# timezone bug: `departureInstant` / `arrivalInstant` come back tagged
+# with `Z` but actually contain local terminal time. We strip the
+# lying `Z` and re-tag with the correct offset (which handles DST
+# automatically via zoneinfo). HA is intentionally absent here — it's
+# ambiguous (Harwich UK vs Halmstad SE) and resolved per-route below.
+_PORT_TZ: dict[str, str] = {
+    "BF": "Europe/London",      # Belfast
+    "CN": "Europe/London",      # Cairnryan
+    "LP": "Europe/London",      # Liverpool / Birkenhead
+    "HH": "Europe/London",      # Holyhead
+    "FI": "Europe/London",      # Fishguard
+    "DB": "Europe/Dublin",      # Dublin
+    "RO": "Europe/Dublin",      # Rosslare
+    "HO": "Europe/Amsterdam",   # Hook of Holland
+    "KI": "Europe/Berlin",      # Kiel
+    "RS": "Europe/Berlin",      # Rostock
+    "TR": "Europe/Berlin",      # Travemünde
+    "GO": "Europe/Stockholm",   # Gothenburg
+    "TB": "Europe/Stockholm",   # Trelleborg
+    "NY": "Europe/Stockholm",   # Nynäshamn
+    "KA": "Europe/Stockholm",   # Karlskrona
+    "FR": "Europe/Copenhagen",  # Frederikshavn
+    "GR": "Europe/Copenhagen",  # Grenaa
+    "LI": "Europe/Riga",        # Liepaja
+    "VE": "Europe/Riga",        # Ventspils
+    "GD": "Europe/Warsaw",      # Gdynia
+}
+
+# Routes where the HA code means Halmstad (Sweden); on every other
+# route HA means Harwich (UK).
+_HA_HALMSTAD_ROUTES: set[str] = {"GRHA", "HAGR"}
+
+
+def _port_tz(port_code: str, route_id: str) -> str:
+    if port_code == "HA":
+        return "Europe/Stockholm" if route_id in _HA_HALMSTAD_ROUTES else "Europe/London"
+    tz = _PORT_TZ.get(port_code)
+    if tz is None:
+        raise StenaLineError(f"unknown Stena port code {port_code!r} on route {route_id!r}")
+    return tz
+
+
+def _retag_instant(instant: str | None, tz_name: str) -> str | None:
+    """Strip Stena's lying Z suffix and re-tag with the port's real offset.
+
+    Stena's GraphQL returns `departureInstant` / `arrivalInstant` as
+    e.g. `2026-05-06T15:00:00Z`, but the value is actually local
+    terminal time, not UTC. Reinterpret it as local time in `tz_name`
+    and emit a properly-offset ISO string. zoneinfo handles DST.
+    """
+    if not instant:
+        return instant
+    naive = datetime.fromisoformat(instant.rstrip("Z").rstrip())
+    aware = naive.replace(tzinfo=ZoneInfo(tz_name))
+    return aware.isoformat()
+
 
 _PASSENGER_GENERIC_IDS: dict[str, str] = {
     "ADULT":   "866B4D8A-8B67-48BF-85CC-BB72C019683C",
@@ -318,6 +377,9 @@ async def get_sailings(
         msgs = [m.get("technicalMessage") for m in result.get("errorMessages", []) or []]
         raise StenaLineError(f"Stena API error: {msgs}")
 
+    dep_tz = _port_tz(route_id[:2], route_id)
+    arr_tz = _port_tz(route_id[2:], route_id)
+
     sailings: list[dict[str, Any]] = []
     for s in result.get("oneWaySailings", {}).get("allSailings", []) or []:
         sail = s.get("sailing", {}) or {}
@@ -339,9 +401,9 @@ async def get_sailings(
 
         sailings.append({
             "departure_date": sail.get("departureDate"),
-            "departure": sail.get("departureInstant"),
+            "departure": _retag_instant(sail.get("departureInstant"), dep_tz),
             "arrival_date": sail.get("arrivalDate"),
-            "arrival": sail.get("arrivalInstant"),
+            "arrival": _retag_instant(sail.get("arrivalInstant"), arr_tz),
             "duration_minutes": _parse_duration(sail.get("duration")),
             "ferry": (sail.get("ferry") or {}).get("name", ""),
             "currency": sailing_currency,

@@ -894,21 +894,26 @@ async def uk_journey(
     `is_arrival` treats the time as a required arrival time instead of
     departure. Schema matches the rest of the travel_*_journey tools.
 
-    `via` is a list of CRS codes or station names to try as single-change
-    interchange points. Accepts either a list (`['LST', 'KGX']`) or a
-    comma-separated string (`'LST,KGX'`) — both forms are normalised.
-    `via_london` enables auto cross-London routing (probes the major
-    London terminals as entry/exit pairs and uses TfL journey planner
-    for live Tube transfer times). Both flags are additive — passing
-    them returns composed journeys merged with any direct services.
+    Routing strategy (in order):
+      1. RTT direct services origin → destination (fast, single API call).
+      2. If no direct AND `via=[…]` was supplied: try each via as a
+         single-change interchange. Accepts list or comma-separated
+         string ('LST,KGX' or ['LST','KGX']).
+      3. If no direct AND `via_london=True`: probe WAT/KGX/STP/LST as
+         cross-London entry/exit pairs, with live Tube transfer times
+         from TfL Journey Planner + per-terminal main-line→Tube
+         egress buffer (KGX 6 min, etc.).
+      4. If no direct AND neither via nor via_london supplied: returns
+         "NO Direct Trains available" prompting the caller to retry
+         with a change point.
 
-    If the route has no direct services AND neither `via` nor
-    `via_london` is supplied, the response prompts the caller to suggest
-    a change point.
-
-    Prefers Transport API's `/uk/public/journey` (change-aware routing)
-    when the account's plan includes it; the Home tier currently does
-    not, so falls through to RTT direct-only + composed.
+    Note: Transport API's `/uk/public/journey` change-aware planner
+    isn't included in the household's Home subscription tier (gated to
+    Public Sector / Commercial — confirmed 403 from the endpoint with
+    current credentials). All multi-leg routing therefore goes through
+    the homegrown composer above. If you upgrade the TAPI plan in
+    future, the code at the top of this function will pick it up
+    automatically.
     """
     from_crs, from_name = await _resolve_crs(origin)
     to_crs, to_name = await _resolve_crs(destination)
@@ -923,12 +928,24 @@ async def uk_journey(
         d = datetime_iso
         t = datetime.now().strftime("%H:%M")
 
-    # Try Transport API first (change-aware)
+    # Try Transport API first (change-aware). Currently gated above
+    # Home tier — _tapi_journey returns None on 403/404 and we fall
+    # through. Log so container logs make the routing path obvious.
     if TAPI_APP_ID and TAPI_APP_KEY:
         tapi_result = await _tapi_journey(from_crs, to_crs, d, t, is_arrival, max_journeys)
         if tapi_result is not None:
+            print(f"uk_journey: TAPI hit — {from_crs}→{to_crs}", flush=True)
             return tapi_result
-        # Fall through to RTT direct-only with a note
+        print(
+            f"uk_journey: TAPI 403/None — {from_crs}→{to_crs}, "
+            f"falling through to RTT direct + composer",
+            flush=True,
+        )
+    else:
+        print(
+            f"uk_journey: TAPI creds absent — {from_crs}→{to_crs}, RTT only",
+            flush=True,
+        )
 
     # RTT direct-only fallback
     try:

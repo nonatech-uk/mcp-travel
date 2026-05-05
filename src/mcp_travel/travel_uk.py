@@ -276,6 +276,396 @@ async def _rtt_get(path: str, params: dict | None = None) -> dict:
     raise RuntimeError("RTT request failed after retries.")  # unreachable
 
 
+# --- Cross-London + via-composer support -------------------------------
+# Used by uk_journey when direct services don't exist (Clandon →
+# Cambridge needs a London-terminal interchange). The user supplies
+# `via=[...]` for explicit single-change composition or
+# `via_london=True` to auto-probe London terminal pairs.
+
+# Main-line terminals probed by via_london=True. Trimmed to the four
+# that actually decide most cross-London journeys — RTT's free-tier
+# rate limit is tight (~5/sec) and a wider probe burst trips it.
+# Callers who need a specific combo can pass via=['XXX','YYY'] explicitly
+# (no probing — uses the supplied terminals directly).
+LONDON_TERMINALS = ("WAT", "KGX", "STP", "LST")
+LONDON_TERMINAL_NAMES = {
+    "WAT": "London Waterloo",  "VIC": "London Victoria",
+    "LBG": "London Bridge",    "CHX": "London Charing Cross",
+    "EUS": "London Euston",    "KGX": "London Kings Cross",
+    "STP": "London St Pancras","PAD": "London Paddington",
+    "LST": "London Liverpool Street", "FST": "London Fenchurch Street",
+    "MYB": "London Marylebone", "WIM": "London Wimbledon",
+}
+
+# Tube/walk transfer minutes between London terminals — enough for
+# realistic interchange planning. Symmetric (frozenset key). 30-min
+# default for any pair not listed.
+LONDON_TRANSFER_MIN = {
+    frozenset({"KGX", "STP"}): 5,    frozenset({"KGX", "EUS"}): 5,
+    frozenset({"STP", "EUS"}): 8,    frozenset({"WAT", "KGX"}): 25,
+    frozenset({"WAT", "STP"}): 25,   frozenset({"WAT", "EUS"}): 25,
+    frozenset({"WAT", "LST"}): 15,   frozenset({"WAT", "PAD"}): 25,
+    frozenset({"WAT", "VIC"}): 15,   frozenset({"WAT", "LBG"}): 10,
+    frozenset({"WAT", "CHX"}): 10,
+    frozenset({"VIC", "KGX"}): 15,   frozenset({"VIC", "STP"}): 15,
+    frozenset({"VIC", "EUS"}): 12,   frozenset({"VIC", "PAD"}): 15,
+    frozenset({"LST", "KGX"}): 15,   frozenset({"LST", "STP"}): 15,
+    frozenset({"LST", "EUS"}): 20,   frozenset({"LST", "FST"}): 5,
+    frozenset({"PAD", "KGX"}): 15,   frozenset({"PAD", "STP"}): 12,
+    frozenset({"PAD", "EUS"}): 12,
+    frozenset({"CHX", "WAT"}): 10,   frozenset({"CHX", "KGX"}): 15,
+    frozenset({"CHX", "LST"}): 12,
+    frozenset({"MYB", "PAD"}): 12,   frozenset({"MYB", "EUS"}): 12,
+    frozenset({"LBG", "KGX"}): 12,   frozenset({"LBG", "VIC"}): 12,
+}
+DEFAULT_TRANSFER_MIN = 30
+
+# Walk between main-line platform and Tube ticket hall at each terminal.
+# TfL's journey planner gives Tube-entrance-to-Tube-entrance time and
+# doesn't include this. KGX is the worst — main-line concourse is well
+# above and away from the Northern/Victoria/Piccadilly platforms.
+TERMINAL_TUBE_ACCESS_MIN = {
+    "KGX": 6, "STP": 5, "EUS": 4, "WAT": 5, "PAD": 5,
+    "VIC": 4, "LST": 3, "LBG": 4, "CHX": 3, "MYB": 5,
+    "FST": 5, "WIM": 3,
+}
+DEFAULT_TUBE_ACCESS_MIN = 4
+
+
+def _tube_access_min(terminal: str) -> int:
+    return TERMINAL_TUBE_ACCESS_MIN.get(terminal.upper(), DEFAULT_TUBE_ACCESS_MIN)
+
+
+def _terminal_transfer_min(a: str, b: str) -> int:
+    if a == b:
+        return 5
+    return LONDON_TRANSFER_MIN.get(frozenset({a, b}), DEFAULT_TRANSFER_MIN)
+
+
+# Process-wide cache of TfL-computed transfer times; refreshed once per
+# (a, b) pair per process. TfL may return slightly different times by
+# time-of-day, but within ~5 min — good enough for journey planning.
+_tfl_transfer_cache: dict[tuple[str, str], int] = {}
+
+
+async def _tfl_transfer_min(client, a: str, b: str) -> int:
+    """Total minutes to interchange between two London terminals: TfL's
+    platform-to-platform Tube/walk time *plus* the main-line egress at
+    A and access at B (TfL doesn't include the walk between main-line
+    concourse and Tube ticket hall — KGX is ~6 min, LST is ~3 min).
+    Falls back to LONDON_TRANSFER_MIN static table on TfL failure
+    (which already bakes in some buffer)."""
+    if a == b:
+        return 5
+    key = tuple(sorted([a, b]))
+    if key in _tfl_transfer_cache:
+        return _tfl_transfer_cache[key]
+    try:
+        from mcp_travel.travel_tfl import journey as _tfl_journey
+        a_name = LONDON_TERMINAL_NAMES.get(a, a)
+        b_name = LONDON_TERMINAL_NAMES.get(b, b)
+        js = await _tfl_journey(
+            client, a_name, b_name, modes=["tube", "walking", "bus"], max_journeys=1,
+        )
+        if js and js[0].get("duration_minutes"):
+            tfl_min = int(js[0]["duration_minutes"])
+            mins = tfl_min + _tube_access_min(a) + _tube_access_min(b)
+            _tfl_transfer_cache[key] = mins
+            return mins
+    except Exception:
+        pass
+    return _terminal_transfer_min(a, b)
+
+
+async def _rtt_service_detail(uid: str) -> dict:
+    """Fetch full calling pattern for a service. Returns the service
+    dict with `locations[]` (each having temporalData + location)."""
+    return await _rtt_get("/rtt/service", {"uniqueIdentity": uid})
+
+
+def _arrival_at(service_detail: dict, crs: str) -> datetime | None:
+    """Extract the arrival time at `crs` from a service detail's calling
+    pattern. Returns None if the service doesn't call there or the
+    timestamp can't be parsed.
+
+    RTT stores CRS in `location.shortCodes[]` (the schema's `crs` is
+    actually under shortCodes, not a top-level field).
+    """
+    target = crs.upper()
+    locations = (service_detail.get("service") or {}).get("locations") or []
+    for loc in locations:
+        short_codes = (loc.get("location") or {}).get("shortCodes") or []
+        if not any(c.upper() == target for c in short_codes):
+            continue
+        td = loc.get("temporalData") or {}
+        # Prefer arrival; if pass-through with only departure, use that
+        for key in ("arrival", "departure"):
+            block = td.get(key)
+            if block:
+                ts = _effective_time(block)
+                if ts:
+                    try:
+                        return datetime.fromisoformat(ts.replace("Z", "+00:00")).replace(tzinfo=None)
+                    except ValueError:
+                        continue
+    return None
+
+
+async def _compose_via_one(
+    from_crs: str, from_name: str,
+    to_crs: str, to_name: str,
+    depart_dt: datetime, via_crs: str,
+    max_pairs: int = 3,
+) -> list[dict]:
+    """Compose origin → via → destination journeys for one via station.
+
+    Tries the next `max_pairs` services origin → via and for each finds
+    the next via → destination service after a sensible change buffer.
+    Returns 0–`max_pairs` composed journey dicts ranked by total time.
+    """
+    journeys: list[dict] = []
+    inbound, _ = await _location_lineup(
+        from_crs, kind="departure", limit=max_pairs * 2,
+        time_from=depart_dt, time_window_min=240, filter_to=via_crs,
+    )
+    if not inbound:
+        return journeys
+
+    for in_svc in inbound[:max_pairs]:
+        # Need the inbound service's arrival time AT the via station
+        sm = in_svc.get("scheduleMetadata") or {}
+        uid = sm.get("uniqueIdentity")
+        if not uid:
+            continue
+        try:
+            detail = await _rtt_service_detail(uid)
+        except Exception:
+            continue
+        via_arrival = _arrival_at(detail, via_crs)
+        if not via_arrival:
+            continue
+
+        # Same-station change uses 10 min; different stations get the
+        # London-terminal transfer matrix (covers Tube/walk).
+        change_min = _terminal_transfer_min(via_crs.upper(), via_crs.upper())
+        target_dep = via_arrival + timedelta(minutes=change_min)
+
+        outbound, _ = await _location_lineup(
+            via_crs, kind="departure", limit=2,
+            time_from=target_dep, time_window_min=180, filter_to=to_crs,
+        )
+        if not outbound:
+            continue
+        out_svc = outbound[0]
+        out_dt_block = (out_svc.get("temporalData") or {}).get("departure") or {}
+        out_depart_str = _effective_time(out_dt_block)
+        try:
+            out_depart_dt = datetime.fromisoformat(out_depart_str.replace("Z", "+00:00")).replace(tzinfo=None)
+        except (ValueError, AttributeError):
+            continue
+
+        # Get out_arrival at dest
+        out_uid = (out_svc.get("scheduleMetadata") or {}).get("uniqueIdentity")
+        out_arrival = None
+        if out_uid:
+            try:
+                out_detail = await _rtt_service_detail(out_uid)
+                out_arrival = _arrival_at(out_detail, to_crs)
+            except Exception:
+                pass
+
+        in_dep_block = (in_svc.get("temporalData") or {}).get("departure") or {}
+        in_depart_str = _effective_time(in_dep_block)
+        try:
+            in_depart_dt = datetime.fromisoformat(in_depart_str.replace("Z", "+00:00")).replace(tzinfo=None)
+        except (ValueError, AttributeError):
+            continue
+
+        end = out_arrival or out_depart_dt
+        total_min = int((end - in_depart_dt).total_seconds() // 60)
+        wait_min = int((out_depart_dt - via_arrival).total_seconds() // 60)
+        journeys.append({
+            "from": from_name, "to": to_name,
+            "via": via_crs.upper(),
+            "depart": in_depart_dt, "arrive": end,
+            "total_min": total_min, "wait_min": wait_min,
+            "leg1": {
+                "depart": in_depart_dt, "arrive": via_arrival,
+                "from": from_name, "to": via_crs.upper(),
+                "operator": (sm.get("operator") or {}).get("name") or "",
+                "headcode": sm.get("trainReportingIdentity") or "",
+            },
+            "leg2": {
+                "depart": out_depart_dt, "arrive": out_arrival,
+                "from": via_crs.upper(), "to": to_name,
+                "operator": ((out_svc.get("scheduleMetadata") or {}).get("operator") or {}).get("name") or "",
+                "headcode": (out_svc.get("scheduleMetadata") or {}).get("trainReportingIdentity") or "",
+            },
+        })
+    return journeys
+
+
+async def _compose_cross_london(
+    from_crs: str, from_name: str,
+    to_crs: str, to_name: str,
+    depart_dt: datetime, max_journeys: int = 5,
+    client = None,
+) -> list[dict]:
+    """Probe all London terminals as candidate entry+exit points and
+    compose 3-train journeys (origin train → Tube transfer → onward
+    train). Returns ranked composed journeys."""
+    # Bounded concurrency — RTT rate-limits aggressively (~5 calls/sec).
+    # 2 in flight is plenty fast and well inside the budget.
+    sem = asyncio.Semaphore(2)
+
+    async def _probe(crs: str, filter_to: str, window: int):
+        async with sem:
+            try:
+                return await _location_lineup(crs, kind="departure", limit=2,
+                                              time_from=depart_dt,
+                                              time_window_min=window, filter_to=filter_to)
+            except Exception as e:
+                return e
+
+    inbound_probes = await asyncio.gather(*[
+        _probe(from_crs, t, 240) for t in LONDON_TERMINALS
+    ])
+    entries = {
+        t: (svcs[0] if isinstance(svcs, tuple) and svcs[0] else None)
+        for t, svcs in zip(LONDON_TERMINALS, inbound_probes)
+    }
+    entry_terminals = {t: s for t, s in entries.items() if s}
+    if not entry_terminals:
+        return []
+
+    # Probe each terminal → dest in parallel — wide time window since we
+    # don't yet know the entry-arrival time. Uses the same bounded
+    # semaphore so total in-flight RTT calls stay <= 2.
+    outbound_probes = await asyncio.gather(*[
+        _probe(t, to_crs, 480) for t in LONDON_TERMINALS
+    ])
+    exit_terminals = {
+        t: (svcs[0] if isinstance(svcs, tuple) and svcs[0] else None)
+        for t, svcs in zip(LONDON_TERMINALS, outbound_probes)
+    }
+    exit_terminals = {t: s for t, s in exit_terminals.items() if s}
+    if not exit_terminals:
+        return []
+
+    candidates: list[dict] = []
+    for entry, in_svcs in entry_terminals.items():
+        in_svc = in_svcs[0]
+        sm = in_svc.get("scheduleMetadata") or {}
+        uid = sm.get("uniqueIdentity")
+        if not uid:
+            continue
+        try:
+            detail = await _rtt_service_detail(uid)
+        except Exception:
+            continue
+        entry_arrival = _arrival_at(detail, entry)
+        if not entry_arrival:
+            continue
+        in_dep_block = (in_svc.get("temporalData") or {}).get("departure") or {}
+        try:
+            in_depart_dt = datetime.fromisoformat(_effective_time(in_dep_block).replace("Z", "+00:00")).replace(tzinfo=None)
+        except (ValueError, AttributeError):
+            continue
+
+        for exit_t in exit_terminals:
+            if exit_t == entry:
+                continue
+            # Live Tube transfer time from TfL where we have a client;
+            # fall back to static table otherwise.
+            if client is not None:
+                tube_min = await _tfl_transfer_min(client, entry, exit_t)
+            else:
+                tube_min = _terminal_transfer_min(entry, exit_t)
+            target_dep = entry_arrival + timedelta(minutes=tube_min)
+            # Find the next exit→dest service after target_dep
+            outbound_search, _ = await _location_lineup(
+                exit_t, kind="departure", limit=1,
+                time_from=target_dep, time_window_min=180, filter_to=to_crs,
+            )
+            if not outbound_search:
+                continue
+            out_svc = outbound_search[0]
+            out_sm = out_svc.get("scheduleMetadata") or {}
+            try:
+                out_depart_dt = datetime.fromisoformat(
+                    _effective_time((out_svc.get("temporalData") or {}).get("departure") or {}).replace("Z", "+00:00")
+                ).replace(tzinfo=None)
+            except (ValueError, AttributeError):
+                continue
+            out_uid = out_sm.get("uniqueIdentity")
+            out_arrival = None
+            if out_uid:
+                try:
+                    out_detail = await _rtt_service_detail(out_uid)
+                    out_arrival = _arrival_at(out_detail, to_crs)
+                except Exception:
+                    pass
+            end = out_arrival or out_depart_dt
+            total_min = int((end - in_depart_dt).total_seconds() // 60)
+            candidates.append({
+                "from": from_name, "to": to_name,
+                "entry": entry, "exit": exit_t,
+                "depart": in_depart_dt, "arrive": end,
+                "total_min": total_min,
+                "tube_min": tube_min,
+                "leg1": {
+                    "depart": in_depart_dt, "arrive": entry_arrival,
+                    "from": from_name, "to": LONDON_TERMINAL_NAMES.get(entry, entry),
+                    "operator": (sm.get("operator") or {}).get("name") or "",
+                    "headcode": sm.get("trainReportingIdentity") or "",
+                },
+                "tube": {
+                    "from": LONDON_TERMINAL_NAMES.get(entry, entry),
+                    "to": LONDON_TERMINAL_NAMES.get(exit_t, exit_t),
+                    "minutes": tube_min,
+                },
+                "leg2": {
+                    "depart": out_depart_dt, "arrive": out_arrival,
+                    "from": LONDON_TERMINAL_NAMES.get(exit_t, exit_t),
+                    "to": to_name,
+                    "operator": (out_sm.get("operator") or {}).get("name") or "",
+                    "headcode": out_sm.get("trainReportingIdentity") or "",
+                },
+            })
+    candidates.sort(key=lambda j: j["total_min"])
+    return candidates[:max_journeys]
+
+
+def _fmt_composed(j: dict, idx: int) -> list[str]:
+    """Render one composed journey as text lines for the uk_journey output."""
+    lines = []
+    lead_arr = j['arrive'].strftime('%H:%M') if j['arrive'] else '?'
+    lead_dep = j['depart'].strftime('%H:%M')
+    if 'tube' in j:
+        # Cross-London 3-leg
+        head = (f"{idx}. {lead_dep} {j['from']} → {lead_arr} {j['to']}   "
+                f"({j['total_min']} min via {j['entry']}→{j['exit']})")
+    else:
+        head = (f"{idx}. {lead_dep} {j['from']} → {lead_arr} {j['to']}   "
+                f"({j['total_min']} min via {j['via']}, change wait {j['wait_min']}m)")
+    lines.append(head)
+    leg1 = j['leg1']
+    a1 = leg1['arrive'].strftime('%H:%M') if leg1['arrive'] else '?'
+    op1 = f" [{leg1['operator']}]" if leg1.get('operator') else ""
+    hc1 = f" {leg1['headcode']}" if leg1.get('headcode') else ""
+    lines.append(f"     • {leg1['depart'].strftime('%H:%M')} {leg1['from']} → {a1} {leg1['to']}{op1}{hc1}")
+    if 'tube' in j:
+        t = j['tube']
+        lines.append(f"     • Tube/walk {t['from']} → {t['to']} (~{t['minutes']} min)")
+    leg2 = j['leg2']
+    a2 = leg2['arrive'].strftime('%H:%M') if leg2['arrive'] else '?'
+    op2 = f" [{leg2['operator']}]" if leg2.get('operator') else ""
+    hc2 = f" {leg2['headcode']}" if leg2.get('headcode') else ""
+    lines.append(f"     • {leg2['depart'].strftime('%H:%M')} {leg2['from']} → {a2} {leg2['to']}{op2}{hc2}")
+    lines.append("")
+    return lines
+
+
 async def _location_lineup(
     code: str,
     kind: str = "departure",
@@ -494,6 +884,8 @@ async def uk_journey(
     is_arrival: bool = False,
     max_journeys: int = 5,
     window_hours: int = 6,
+    via: list[str] | None = None,
+    via_london: bool = False,
 ) -> str:
     """Plan a train journey between two UK stations.
 
@@ -502,10 +894,20 @@ async def uk_journey(
     `is_arrival` treats the time as a required arrival time instead of
     departure. Schema matches the rest of the travel_*_journey tools.
 
+    `via` is a list of CRS codes or station names to try as single-change
+    interchange points. `via_london` enables auto cross-London routing
+    (probes the major London terminals as entry/exit pairs and uses TfL
+    journey planner for live Tube transfer times). Both flags are
+    additive — passing them returns composed journeys merged with any
+    direct services.
+
+    If the route has no direct services AND neither `via` nor
+    `via_london` is supplied, the response prompts the caller to suggest
+    a change point.
+
     Prefers Transport API's `/uk/public/journey` (change-aware routing)
-    when the account's plan includes it. Falls back to RTT `filterTo`
-    which finds only direct services — in that mode, `window_hours`
-    controls how far ahead to look and `is_arrival` is ignored.
+    when the account's plan includes it; the Home tier currently does
+    not, so falls through to RTT direct-only + composed.
     """
     from_crs, from_name = await _resolve_crs(origin)
     to_crs, to_name = await _resolve_crs(destination)
@@ -542,14 +944,51 @@ async def uk_journey(
         time_window_min=window_min,
         filter_to=to_crs,
     )
-    hint = (
-        "(Transport API plan does not include journey planning — showing "
-        "direct services only. Upgrade to Home Use at developer.transportapi.com "
-        "to enable change-aware routing.)"
-    )
+
+    # No direct services — try composer if user asked for via/via_london
     if not services:
+        composed: list[dict] = []
+        if via:
+            for via_label in via:
+                via_crs, _ = await _resolve_crs(via_label)
+                composed.extend(await _compose_via_one(
+                    from_crs, from_name, to_crs, to_name, time_from, via_crs,
+                ))
+        if via_london:
+            async with httpx.AsyncClient(timeout=20.0) as tfl_client:
+                composed.extend(await _compose_cross_london(
+                    from_crs, from_name, to_crs, to_name, time_from,
+                    max_journeys=max_journeys, client=tfl_client,
+                ))
+        composed.sort(key=lambda j: j["total_min"])
+        composed = composed[:max_journeys]
+
+        if composed:
+            header = (
+                f"{from_name} ({from_crs}) → {to_name} ({to_crs}) — "
+                f"{len(composed)} composed journey"
+                f"{'s' if len(composed) != 1 else ''} (no direct services)"
+            )
+            lines = [header, ""]
+            for i, j in enumerate(composed, 1):
+                lines.extend(_fmt_composed(j, i))
+            return "\n".join(lines).rstrip()
+
+        # Nothing direct, no via supplied — prompt the caller
+        if not via and not via_london:
+            return (
+                f"NO Direct Trains available {from_name} → {to_name} — "
+                f"please suggest a change.\n"
+                f"  • For cross-London routing, retry with via_london=True "
+                f"(uses TfL transfer times via the major London terminals)\n"
+                f"  • For a known interchange, retry with via=['CRS'] "
+                f"(e.g. via=['RDG'] for Reading, via=['BHM'] for Birmingham)"
+            )
+        # via supplied but composer found nothing
         return (
-            f"No direct trains found {from_name} → {to_name}.\n{hint}"
+            f"No journeys found {from_name} → {to_name}, even via "
+            f"{via or 'London terminals'}. Try a different change point "
+            f"or a wider time window."
         )
 
     header = (
@@ -576,8 +1015,6 @@ async def uk_journey(
         )
         if uid:
             lines.append(f"   service: {uid}")
-    lines.append("")
-    lines.append(hint)
     return "\n".join(lines).rstrip()
 
 

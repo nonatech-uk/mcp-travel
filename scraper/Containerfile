@@ -1,0 +1,23 @@
+# mcp-travel-scraper — sidecar container with Playwright + Chromium.
+#
+# Image size: ~1.2 GB (chromium + system libs). This is why it lives in
+# its own container instead of being folded into the main mcp-travel
+# image, which stays at ~255 MB.
+FROM python:3.12-slim
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+WORKDIR /app
+
+COPY pyproject.toml .
+COPY app/ app/
+RUN uv pip install --system --no-cache .
+
+# `playwright install --with-deps` installs Chromium + the apt packages
+# Chromium needs (fonts, libgbm, libnss3 etc.). Without --with-deps you
+# get a chromium that fails to launch headless on Debian slim.
+RUN python -m playwright install --with-deps chromium
+
+# uvicorn entry — reads SCRAPER_HOST and SCRAPER_PORT from env.
+EXPOSE 8080
+CMD ["python", "-m", "app.main"]

@@ -227,6 +227,9 @@ async def check(
     from mcp_travel.travel_po_ferries import (
         get_sailings as po_sailings, is_known_route as po_known, POFerriesError,
     )
+    from mcp_travel.travel_irish_ferries import (
+        get_sailings as irish_sailings, is_known_route as irish_known, IrishFerriesError,
+    )
 
     data_sources: set[str] = {"static-table"}
 
@@ -383,6 +386,37 @@ async def check(
                 opt["data_sources"] = ["stena-line-live"]
                 data_sources.add("stena-line-live")
             except StenaLineError as e:
+                opt["live_error"] = str(e)
+
+        # Irish Ferries — Playwright-driven scrape via mcp-travel-scraper
+        # sidecar. Irish Sea (Dublin/Holyhead, Rosslare/Pembroke) +
+        # Rosslare↔Cherbourg. 15-25s per scrape — caller's 24h cache absorbs.
+        elif (
+            client is not None
+            and "irish ferries" in op_lower
+            and irish_known(r["origin_port"], r["dest_port"])
+        ):
+            try:
+                sailings = await irish_sailings(
+                    client,
+                    date=date,
+                    origin=r["origin_port"],
+                    destination=r["dest_port"],
+                    adults=passengers,
+                    vehicle=vehicle,
+                )
+                available = [
+                    s["best_price"] for s in sailings
+                    if s.get("best_price") is not None
+                ]
+                opt["live_data"] = True
+                opt["sailings"] = sailings
+                opt["sailing_count"] = len(sailings)
+                opt["best_price"] = min(available) if available else None
+                opt["currency"] = sailings[0]["currency"] if sailings else "EUR"
+                opt["data_sources"] = ["irish-ferries-live"]
+                data_sources.add("irish-ferries-live")
+            except IrishFerriesError as e:
                 opt["live_error"] = str(e)
 
         options.append(opt)

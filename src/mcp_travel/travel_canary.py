@@ -179,6 +179,18 @@ async def check_po_hull_rotterdam(client):
     return f"{len(s)} sailings"
 
 
+async def check_irish_ferries(client):
+    """Playwright sidecar — Dublin↔Holyhead is Irish Ferries' busiest route.
+    Slow (15-25s) but the most fragile of all live ferry data (Imperva WAF,
+    SPA brittleness), so worth a weekly probe."""
+    from mcp_travel.travel_irish_ferries import get_sailings
+    s = await get_sailings(client, DATE, "dublin", "holyhead", adults=1, vehicle="foot")
+    if len(s) < 1:
+        raise AssertionError(f"only {len(s)} sailings (sidecar may be down)")
+    avail = [x["best_price"] for x in s if x.get("best_price") is not None]
+    return f"{len(s)} sailings, {len(avail)} priced"
+
+
 async def check_trenitalia(client):
     """Trenitalia BFF — CSRF-token + gzipped JSON. The most fragile of
     the scraped endpoints (multi-step auth, fully obfuscated SPA), so
@@ -305,6 +317,7 @@ CHECKS_SCRAPED: list[tuple[str, Callable]] = [
     ("po-dover-calais",        check_po_dover_calais),
     ("po-larne-cairnryan",     check_po_larne_cairnryan),
     ("po-hull-rotterdam",      check_po_hull_rotterdam),
+    ("irish-ferries-sidecar",  check_irish_ferries),
     ("trenitalia-bff",         check_trenitalia),
 ]
 

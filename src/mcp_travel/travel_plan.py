@@ -44,8 +44,10 @@ from mcp_travel.travel_rank import (
     REGION_EUROSTAR,
     REGION_MODES,
     SKI_RESORTS,
+    classify_origin_region,
     classify_region,
     confidence,
+    filter_modes_by_origin,
     score,
 )
 
@@ -356,8 +358,24 @@ async def build_flight(
     dest_iata_override: str | None = None,
     prefer_carriers: list[str] | None = None,
     exclude_carriers: list[str] | None = None,
+    origin_region: str = "uk",
 ) -> dict[str, Any]:
     airports = REGION_AIRPORTS.get(region) or {"origin": ["LGW"], "destination": ["CDG"]}
+    if origin_region != "uk":
+        # build_flight currently assumes UK origin airports (LGW/LHR). Picking
+        # one for a non-UK origin would route the user via London — wrong
+        # answer. Stage 5b will geocode the origin and pick a nearby airport;
+        # until then surface a clean error pointing at the per-mode tools.
+        return {
+            "ok": False,
+            "mode": "flight",
+            "error": (
+                f"plan_trip's flight composer assumes a UK origin. For non-UK "
+                f"origins ({origin_region!r}), use travel_flight_check + the "
+                f"appropriate travel_rail_<iso>_journey directly until Stage 5b "
+                f"cross-EU multi-leg composition lands."
+            ),
+        }
     origin_iata = airports["origin"][0]
     if dest_iata_override:
         dest_iata = dest_iata_override
@@ -1215,8 +1233,20 @@ async def plan_trip_impl(
     if not geo:
         return {"ok": False, "error": f"could not geocode destination {destination!r}"}
 
-    # 2. Classify region
+    # 2. Classify destination region (mode-set lookup key)
     region = classify_region(geo["lat"], geo["lon"], query=destination)
+
+    # 2b. Geocode origin and classify its region. We only need the
+    # country code (or lat/lon fallback) — drives mode filtering below
+    # so that a non-UK origin doesn't get UK-only modes proposed.
+    origin_geo = await forward_geocode(
+        ctx["client"], ctx["pool"], pool_locations=ctx.get("pool_locations"), query=origin,
+    )
+    origin_region = classify_origin_region(
+        (origin_geo or {}).get("country_code"),
+        (origin_geo or {}).get("lat"),
+        (origin_geo or {}).get("lon"),
+    )
 
     # 3. Resolve party defaults
     if party is None:
@@ -1224,12 +1254,18 @@ async def plan_trip_impl(
             rows = await conn.fetch("SELECT name FROM party_member WHERE is_default=true ORDER BY id")
             party = [r["name"] for r in rows]
 
-    # 4. Pick mode set
-    modes = REGION_MODES.get(region, ["eurotunnel", "flight"])
+    # 4. Pick mode set, then filter by origin region.
+    modes_raw = REGION_MODES.get(region, ["eurotunnel", "flight"])
+    modes = filter_modes_by_origin(modes_raw, origin_region)
+    # If origin filter dropped every mode (e.g. Norwegian origin to a UK-only
+    # mode set), fall back to flight — we can always fly. Stage 5b will
+    # provide cross-EU multi-leg composition for the long-haul rail cases.
+    if not modes:
+        modes = ["flight"]
     if fly_only:
         modes = [m for m in modes if m in ("flight", "fly_geneva_drive")]
         if not modes:
-            modes = ["flight"]   # ensure at least one flight option for fly_only requests
+            modes = ["flight"]
     if not modes:
         return {"ok": False, "error": f"region {region!r} has no candidate modes"}
 
@@ -1254,13 +1290,15 @@ async def plan_trip_impl(
                                            origin=origin, origin_label=origin_label,
                                            dest_iata_override=ap,
                                            prefer_carriers=prefer_carriers,
-                                           exclude_carriers=exclude_carriers)))
+                                           exclude_carriers=exclude_carriers,
+                                           origin_region=origin_region)))
         elif m == "fly_geneva_drive":
             tasks.append(("fly_geneva_drive",
                           build_flight(ctx, region, geo, depart_dt, alps_geneva=True,
                                        origin=origin, origin_label=origin_label,
                                        prefer_carriers=prefer_carriers,
-                                       exclude_carriers=exclude_carriers)))
+                                       exclude_carriers=exclude_carriers,
+                                       origin_region=origin_region)))
         elif m == "north_sea_ferry":
             tasks.append(("north_sea_ferry",
                           build_north_sea_ferry(ctx, geo, depart_dt,
@@ -1328,6 +1366,10 @@ async def plan_trip_impl(
 
     payload = {
         "ok": True,
+        "origin": origin,
+        "origin_resolved": (origin_geo or {}).get("display_name"),
+        "origin_country": (origin_geo or {}).get("country_code"),
+        "origin_region": origin_region,
         "destination": destination,
         "destination_resolved": geo["display_name"],
         "destination_lat": geo["lat"],
@@ -1335,6 +1377,7 @@ async def plan_trip_impl(
         "destination_country": geo.get("country_code"),
         "region": region,
         "modes_considered": modes,
+        "modes_dropped_by_origin": [m for m in modes_raw if m not in modes],
         "depart_date": depart_date,
         "return_date": return_date,
         "party": party,

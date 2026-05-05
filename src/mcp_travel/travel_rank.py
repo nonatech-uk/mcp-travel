@@ -192,6 +192,77 @@ REGION_EUROSTAR: dict[str, str] = {
 }
 
 
+# --- Origin classification (Stage 5a) ----------------------------------
+# Mode availability depends on where you're starting from, not just where
+# you're going. plan_trip historically assumed a UK origin and therefore
+# offered Eurostar / Eurotunnel / Irish-sea / North-sea ferries
+# unconditionally. With explicit non-UK origins (e.g. Zermatt → Tromsø),
+# those modes need to be gated out.
+
+# Coarse origin regions, named for what they unlock — not for geographic
+# precision. Only the distinctions that change mode availability matter.
+def classify_origin_region(
+    country_code: str | None,
+    lat: float | None = None,
+    lon: float | None = None,
+) -> str:
+    """Return one of: 'uk', 'ireland', 'continental-eu', 'nordic', 'other'.
+
+    Country code is the cheap path; lat/lon fallback only kicks in when
+    forward_geocode didn't return a country_code (rare).
+    """
+    if country_code:
+        cc = country_code.upper()
+        if cc == "GB":
+            return "uk"
+        if cc == "IE":
+            return "ireland"
+        if cc in {"NO", "SE", "DK", "FI", "IS"}:
+            return "nordic"
+        if cc in {
+            "FR", "BE", "NL", "LU", "DE", "CH", "AT", "IT", "ES", "PT",
+            "PL", "CZ", "HU", "SK", "SI", "HR", "EE", "LV", "LT", "RO", "BG",
+            "GR", "MT", "CY", "MC", "AD", "LI", "SM", "VA",
+        }:
+            return "continental-eu"
+        return "other"
+    # Lat/lon fallback (loose boxes — only used when country_code missing)
+    if lat is not None and lon is not None:
+        if 49.5 <= lat <= 60.0 and -8.5 <= lon <= 2.0:
+            return "uk"
+        if 51.4 <= lat <= 55.5 and -10.8 <= lon <= -5.4:
+            return "ireland"
+        if 54.0 <= lat <= 71.5 and 4.0 <= lon <= 31.0:
+            return "nordic"
+        if 35.0 <= lat <= 60.0 and -10.0 <= lon <= 30.0:
+            return "continental-eu"
+    return "other"
+
+
+# Modes that are only meaningful from specific origin regions. Anything
+# not in this map is available from every origin (flight,
+# fly_geneva_drive, multiday-drive).
+ORIGIN_GATED_MODES: dict[str, set[str]] = {
+    "eurostar":         {"uk"},
+    "eurotunnel":       {"uk"},
+    "north_sea_ferry":  {"uk"},
+    "irish_sea_ferry":  {"uk", "ireland"},
+}
+
+
+def filter_modes_by_origin(modes: list[str], origin_region: str) -> list[str]:
+    """Drop modes that don't make sense from this origin region.
+
+    Empty result is possible (e.g. a Norwegian origin with a destination
+    region whose only modes are eurostar + eurotunnel) — the caller
+    should fall back to flight in that case.
+    """
+    return [
+        m for m in modes
+        if m not in ORIGIN_GATED_MODES or origin_region in ORIGIN_GATED_MODES[m]
+    ]
+
+
 def score(option: dict[str, Any]) -> float:
     """Lower is better. Door-to-door minutes plus 60 min penalty per transfer."""
     if not option.get("ok"):

@@ -280,6 +280,45 @@ async def travel_rail_ch_journey(
         )
         if products_str:
             lines.append(f"   {products_str}")
+
+        # Per-leg breakdown — each HAFAS section is either a journey
+        # (train/bus/tram/ship) or a walk. Surfacing them lets the LLM
+        # show the user exactly which trains they're catching, the
+        # interchange platforms, and where to wait.
+        for sec in c.get("sections") or []:
+            sec_dep = sec.get("departure") or {}
+            sec_arr = sec.get("arrival") or {}
+            sec_dep_t = _fmt_time(sec_dep.get("departure"))
+            sec_arr_t = _fmt_time(sec_arr.get("arrival"))
+            sec_dep_st = ((sec_dep.get("station") or {}).get("name") or "?")
+            sec_arr_st = ((sec_arr.get("station") or {}).get("name") or "?")
+            sec_dep_p = _platform(sec_dep)
+            sec_arr_p = _platform(sec_arr)
+            walk = sec.get("walk") or {}
+            journey = sec.get("journey") or {}
+            if walk and not journey:
+                walk_min = walk.get("duration")
+                walk_label = f"walk {walk_min // 60}m" if isinstance(walk_min, int) else "walk"
+                leg = (
+                    f"     • {sec_dep_t or '    '} {sec_dep_st}"
+                    f"  →  {sec_arr_t or '    '} {sec_arr_st}"
+                    f"   ({walk_label})"
+                )
+            else:
+                cat = journey.get("category") or ""
+                num = journey.get("number") or journey.get("name") or ""
+                operator = journey.get("operator") or ""
+                heading = (journey.get("to") or "").strip()
+                svc = f"{cat} {num}".strip() or "?"
+                op_str = f" [{operator}]" if operator and operator != cat else ""
+                head_str = f" → {heading}" if heading else ""
+                marker = _delay_marker(sec_dep) + _delay_marker(sec_arr)
+                leg = (
+                    f"     • {sec_dep_t} {sec_dep_st} {sec_dep_p}".rstrip()
+                    + f"  →  {sec_arr_t} {sec_arr_st} {sec_arr_p}".rstrip()
+                    + f"   {svc}{op_str}{head_str}{marker}"
+                )
+            lines.append(leg)
         lines.append("")
 
     return "\n".join(lines).rstrip()

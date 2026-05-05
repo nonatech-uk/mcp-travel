@@ -39,6 +39,7 @@ from mcp_travel.travel_geocode import forward_geocode
 from mcp_travel.travel_duffel import search_offers
 from mcp_travel.travel_rank import (
     AIRPORT_OVERHEAD_MIN,
+    AIRPORT_RAIL_STATIONS,
     PREDEPARTURE_BUFFER_MIN,
     REGION_AIRPORTS,
     REGION_EUROSTAR,
@@ -122,6 +123,102 @@ def _final_leg_from(info: dict | None) -> list[dict[str, Any]]:
         "operator": info["final_operator"],
         "note": info["final_note"],
     }]
+
+
+def _parse_sbb_duration(s: str) -> int | None:
+    """Parse SBB '00d04:32:00' (DDdHH:MM:SS) format to minutes."""
+    if not s or "d" not in s:
+        return None
+    try:
+        days_part, time_part = s.split("d", 1)
+        h, m, _ = time_part.split(":")
+        return int(days_part) * 1440 + int(h) * 60 + int(m)
+    except (ValueError, AttributeError):
+        return None
+
+
+async def _rail_to_airport(
+    ctx, origin: str, origin_iata: str, depart_dt: datetime,
+    origin_country: str | None,
+) -> tuple[int, str] | None:
+    """Try to compute rail-leg minutes from origin to airport's rail
+    station. Returns (minutes, station_name) including any shuttle
+    overhead, or None if no rail option (no station mapped, country
+    mismatch, planner failure).
+
+    Currently covers LGW (UK), GVA / ZRH / BSL (CH), MXP (IT). For
+    BSL the airport is on French soil — we use Basel SBB + a fixed
+    20-min shuttle allowance. Other airports route directly to the
+    on-airport rail station.
+    """
+    info = AIRPORT_RAIL_STATIONS.get(origin_iata.upper())
+    if not info:
+        return None
+    if info["country"] != (origin_country or "").upper():
+        return None
+
+    station = info["station"]
+    extra = info.get("extra_min", 0)
+    date_str = depart_dt.strftime("%Y-%m-%d")
+    time_str = depart_dt.strftime("%H:%M")
+
+    try:
+        if info["country"] == "CH":
+            from mcp_travel.travel_sbb import _get as sbb_get
+            data = await sbb_get("/connections", {
+                "from": origin, "to": station,
+                "date": date_str, "time": time_str, "limit": 1,
+            })
+            connections = data.get("connections", [])
+            if not connections:
+                return None
+            mins = _parse_sbb_duration(connections[0].get("duration", ""))
+            if mins is None:
+                return None
+            return mins + extra, station
+
+        if info["country"] == "GB":
+            # Resolve both ends to CRS, hit Transport API journey endpoint.
+            # TAPI may 403 if the plan doesn't include /journey — silently
+            # fall back to drive in that case.
+            from mcp_travel.travel_uk import _resolve_crs, _tapi_get
+            try:
+                from_crs, _ = await _resolve_crs(origin)
+                to_crs, _ = await _resolve_crs(station)
+            except Exception:
+                return None
+            path = (
+                f"/uk/public/journey/from/crs:{from_crs}/to/crs:{to_crs}"
+                f"/at/{date_str}/{time_str}.json"
+            )
+            try:
+                data = await _tapi_get(path, {"service": "train", "modes": "train"})
+            except Exception:
+                return None
+            routes = (data.get("routes") or [])
+            if not routes:
+                return None
+            r0 = routes[0]
+            try:
+                dep = datetime.fromisoformat(r0.get("departure_datetime"))
+                arr = datetime.fromisoformat(r0.get("arrival_datetime"))
+                mins = int((arr - dep).total_seconds() // 60)
+                return mins + extra, station
+            except (ValueError, TypeError, AttributeError):
+                return None
+
+        if info["country"] == "IT":
+            from mcp_travel.travel_trenitalia_live import get_solutions
+            solutions = await get_solutions(
+                ctx["client"], date_str, origin, station,
+                departure_after=time_str, limit=1,
+            )
+            if solutions and solutions[0].get("duration_minutes"):
+                return solutions[0]["duration_minutes"] + extra, station
+    except Exception:
+        return None
+
+    return None
 
 
 async def build_eurotunnel(
@@ -397,13 +494,49 @@ async def build_flight(
                 "error": f"no airport mapping for destination country {dest_country!r}",
             }
 
-    # Drive home → origin airport
-    drive_to_apt = await _drive_or_fallback(
-        ctx["client"], origin,
-        f"{origin_iata} airport",
-        _to_iso_z(depart_dt), fallback_min=60,
+    # Origin → airport access leg. Compute drive and (where supported)
+    # rail in parallel; pick whichever is faster. Currently rail is
+    # available for LGW (UK), GVA / ZRH / BSL (CH), MXP (IT) — see
+    # AIRPORT_RAIL_STATIONS. For Zermatt → ZRH and similar the rail
+    # leg comfortably wins (and the destination is car-free anyway);
+    # for Surrey → LGW the drive usually wins. Picker handles both.
+    drive_to_apt, rail_alt = await asyncio.gather(
+        _drive_or_fallback(
+            ctx["client"], origin, f"{origin_iata} airport",
+            _to_iso_z(depart_dt), fallback_min=60,
+        ),
+        _rail_to_airport(ctx, origin, origin_iata, depart_dt, origin_country),
     )
-    drive_min_uk = int(round(drive_to_apt["duration_minutes"]))
+    drive_min = int(round(drive_to_apt["duration_minutes"]))
+    # Bias toward rail by 30min — accounts for rail's non-time
+    # advantages (no parking, can work en route, often cheaper, no
+    # car-rental hassle at destination) and partially mitigates the
+    # car-free-village trap (Google Maps drive ETAs from places like
+    # Zermatt or Verbier assume you start from the nearest car park,
+    # which the user often can't actually reach by car).
+    RAIL_BIAS_MIN = 30
+    if rail_alt and rail_alt[0] <= drive_min + RAIL_BIAS_MIN:
+        access_minutes = rail_alt[0]
+        access_kind = "rail"
+        access_to = rail_alt[1]
+        if rail_alt[0] < drive_min:
+            access_note = f"rail to {rail_alt[1]} (faster than {drive_min}min drive)"
+        else:
+            access_note = (
+                f"rail to {rail_alt[1]} ({rail_alt[0]}min vs {drive_min}min drive — "
+                f"rail preferred for parking/reliability)"
+            )
+    else:
+        access_minutes = drive_min
+        access_kind = "drive"
+        access_to = f"{origin_iata} airport"
+        access_note = (
+            f"{drive_to_apt.get('distance_km','?')} km"
+            + (" (live traffic)" if not drive_to_apt.get("fallback") else " (static estimate)")
+        )
+        if rail_alt:
+            access_note += f" — rail alternative is {rail_alt[0]}min via {rail_alt[1]}"
+    drive_min_uk = access_minutes  # historical name kept for downstream d2d math
 
     # Flight via Duffel
     try:
@@ -448,10 +581,10 @@ async def build_flight(
     door_to_door = drive_min_uk + AIRPORT_OVERHEAD_MIN + flight_min + 30 + drive_min_dest + final_minutes
     mode = "fly_geneva_drive" if alps_geneva else "flight"
     legs = [
-        {"kind": "drive", "from": origin_label, "to": f"{origin_iata} airport",
-         "minutes": drive_min_uk, "operator": "self-drive",
-         "note": f"{drive_to_apt.get('distance_km','?')} km"
-                 + (" (live traffic)" if not drive_to_apt.get("fallback") else " (static estimate)")},
+        {"kind": access_kind, "from": origin_label, "to": access_to,
+         "minutes": access_minutes,
+         "operator": "self-drive" if access_kind == "drive" else "national rail",
+         "note": access_note},
         {"kind": "wait", "from": f"{origin_iata} airport", "to": f"{origin_iata} airport",
          "minutes": AIRPORT_OVERHEAD_MIN, "note": "Check-in + security + walk to gate"},
         {"kind": "flight", "from": origin_iata, "to": dest_iata,

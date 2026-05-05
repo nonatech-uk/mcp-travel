@@ -311,8 +311,14 @@ CITY_TO_IATA: dict[str, str] = {
     "paris": "CDG", "lyon": "LYS", "marseille": "MRS",
     "toulouse": "TLS", "nice": "NCE", "bordeaux": "BOD", "nantes": "NTE",
     "vienna": "VIE", "salzburg": "SZG", "innsbruck": "INN",
-    "milan": "MXP", "rome": "FCO", "venice": "VCE",
-    "naples": "NAP", "bologna": "BLQ", "florence": "FLR",
+    "milan": "MXP", "milano": "MXP",
+    "como": "MXP", "lake como": "MXP", "lago di como": "MXP",
+    "bergamo": "MXP", "lugano": "MXP",  # Lugano is CH but closer to MXP than ZRH
+    "turin": "MXP", "torino": "MXP",
+    "rome": "FCO", "roma": "FCO",
+    "venice": "VCE", "venezia": "VCE",
+    "naples": "NAP", "napoli": "NAP",
+    "bologna": "BLQ", "florence": "FLR", "firenze": "FLR",
     "barcelona": "BCN", "madrid": "MAD", "malaga": "AGP",
     "palma": "PMI", "valencia": "VLC", "seville": "SVQ",
     "lisbon": "LIS", "porto": "OPO", "faro": "FAO",
@@ -324,6 +330,21 @@ CITY_TO_IATA: dict[str, str] = {
     # UK / Ireland
     "dublin": "DUB", "cork": "ORK", "london": "LHR",
     "manchester": "MAN", "edinburgh": "EDI", "glasgow": "GLA",
+}
+
+
+# Airports with a rail station — used by build_flight to compare a
+# rail-to-airport leg against the drive ETA and pick whichever is
+# faster. Only includes airports where the rail option is actually
+# competitive *and* we have a journey planner for the country.
+# `extra_min` covers any airport-shuttle leg (e.g. EAP at Basel is on
+# French soil, no direct rail; Basel SBB station + 15-20min bus).
+AIRPORT_RAIL_STATIONS: dict[str, dict[str, Any]] = {
+    "LGW": {"station": "Gatwick Airport", "country": "GB", "extra_min": 0},
+    "ZRH": {"station": "Zürich Flughafen", "country": "CH", "extra_min": 0},
+    "GVA": {"station": "Genève-Aéroport", "country": "CH", "extra_min": 0},
+    "BSL": {"station": "Basel SBB", "country": "CH", "extra_min": 20},
+    "MXP": {"station": "Milano Malpensa Aeroporto", "country": "IT", "extra_min": 0},
 }
 
 

@@ -884,7 +884,7 @@ async def uk_journey(
     is_arrival: bool = False,
     max_journeys: int = 5,
     window_hours: int = 6,
-    via: list[str] | None = None,
+    via: list[str] | str | None = None,
     via_london: bool = False,
 ) -> str:
     """Plan a train journey between two UK stations.
@@ -895,11 +895,12 @@ async def uk_journey(
     departure. Schema matches the rest of the travel_*_journey tools.
 
     `via` is a list of CRS codes or station names to try as single-change
-    interchange points. `via_london` enables auto cross-London routing
-    (probes the major London terminals as entry/exit pairs and uses TfL
-    journey planner for live Tube transfer times). Both flags are
-    additive — passing them returns composed journeys merged with any
-    direct services.
+    interchange points. Accepts either a list (`['LST', 'KGX']`) or a
+    comma-separated string (`'LST,KGX'`) — both forms are normalised.
+    `via_london` enables auto cross-London routing (probes the major
+    London terminals as entry/exit pairs and uses TfL journey planner
+    for live Tube transfer times). Both flags are additive — passing
+    them returns composed journeys merged with any direct services.
 
     If the route has no direct services AND neither `via` nor
     `via_london` is supplied, the response prompts the caller to suggest
@@ -947,9 +948,20 @@ async def uk_journey(
 
     # No direct services — try composer if user asked for via/via_london
     if not services:
+        # Coerce via input. Pydantic occasionally hands us a string when
+        # the schema's `array` constraint is permissive (e.g. via='LST'
+        # or via='LST,KGX'). Normalise to a list either way.
+        via_list: list[str]
+        if via is None:
+            via_list = []
+        elif isinstance(via, str):
+            via_list = [v.strip() for v in via.split(",") if v.strip()]
+        else:
+            via_list = [str(v).strip() for v in via if str(v).strip()]
+
         composed: list[dict] = []
-        if via:
-            for via_label in via:
+        if via_list:
+            for via_label in via_list:
                 via_crs, _ = await _resolve_crs(via_label)
                 composed.extend(await _compose_via_one(
                     from_crs, from_name, to_crs, to_name, time_from, via_crs,

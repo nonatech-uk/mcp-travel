@@ -31,6 +31,60 @@ def _normalise(query: str) -> str:
     return " ".join(query.lower().strip().split())
 
 
+# Generic English locality descriptors that confuse Nominatim's tokeniser
+# when appended to a non-English place name. Real-world failure: "Zürich
+# city centre" returned a building called "Zurich" on Norfolk Street in
+# Manchester city centre because OSM has many nodes literally named
+# "city centre" and the tokeniser scored that match higher than the
+# proper Swiss city. Stripping the descriptor before the live call
+# reliably returns Zürich the city. Only stripped if the descriptor sits
+# at the END of the query — "Old Town Prague" is a real POI and stays
+# as-is.
+_GENERIC_LOCALITY_SUFFIXES = (
+    "city centre", "city center",
+    "town centre", "town center",
+    "downtown",
+    "high street",
+    "old town",
+)
+
+
+def _strip_generic_locality(query: str) -> str:
+    q = query.strip()
+    low = q.lower()
+    for suffix in _GENERIC_LOCALITY_SUFFIXES:
+        for sep in (" " + suffix, ", " + suffix, "," + suffix):
+            if low.endswith(sep):
+                stripped = q[: len(q) - len(sep)].rstrip(", ").strip()
+                if stripped:
+                    return stripped
+    return q
+
+
+def _select_best_geocode(items: list[dict]) -> dict | None:
+    """Pick the best Nominatim result from a multi-result response.
+
+    Defense-in-depth for the same Zürich/Manchester problem: if the top
+    hit is a POI/building (place_rank ≥ 26 = street or smaller), look
+    for a city-scale alternative (place_rank ≤ 22 = suburb or larger).
+    Only override if the city-scale alternative is in a *different*
+    country — same-country POI matches like "Hotel Krone Zermatt" stay
+    valid (the hotel and the city are both in CH).
+    """
+    if not items:
+        return None
+    top = items[0]
+    if int(top.get("place_rank", 99)) <= 22:
+        return top
+    top_cc = (top.get("address") or {}).get("country_code")
+    for it in items[1:]:
+        if int(it.get("place_rank", 99)) <= 22:
+            it_cc = (it.get("address") or {}).get("country_code")
+            if it_cc and it_cc != top_cc:
+                return it
+    return top
+
+
 async def lookup_named_place(
     pool_loc: asyncpg.Pool, query: str
 ) -> dict[str, Any] | None:
@@ -106,9 +160,13 @@ async def forward_geocode(
         "NOMINATIM_USER_AGENT",
         f"mcp-travel ({os.environ.get('MCP_TRAVEL_CONTACT', 'mcp-travel@example.com')})",
     )
+    # Strip generic English locality suffixes ("Zürich city centre"
+    # → "Zürich") before the live call. Cache key stays the original
+    # normalised query so identical inputs always hit cache.
+    nominatim_q = _strip_generic_locality(query)
     resp = await client.get(
         NOMINATIM_BASE,
-        params={"q": query, "format": "json", "limit": 1, "addressdetails": 1},
+        params={"q": nominatim_q, "format": "json", "limit": 5, "addressdetails": 1},
         headers={"User-Agent": ua, "Accept-Language": "en"},
         timeout=15.0,
     )
@@ -120,7 +178,9 @@ async def forward_geocode(
     if not items:
         return None
 
-    top = items[0]
+    top = _select_best_geocode(items)
+    if top is None:
+        return None
     lat = float(top["lat"])
     lon = float(top["lon"])
     display = top.get("display_name", query)

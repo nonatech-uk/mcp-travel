@@ -191,6 +191,20 @@ async def check_irish_ferries(client):
     return f"{len(s)} sailings, {len(avail)} priced"
 
 
+async def check_ryanair(client):
+    """Playwright sidecar — DUB↔STN is one of Ryanair's busiest pairs and
+    is always-on year-round, so it's the safest canary route. Closes the
+    Duffel-inventory gap (FR not on Duffel)."""
+    from mcp_travel.travel_ryanair import get_flights
+    f = await get_flights(client, DATE, "DUB", "STN", adults=1)
+    if len(f) < 1:
+        raise AssertionError(f"only {len(f)} flights (sidecar may be down)")
+    avail = [x["best_price"] for x in f if x.get("best_price") is not None]
+    if not avail:
+        raise AssertionError("no priced flights")
+    return f"{len(f)} flights, cheapest €{min(avail)}"
+
+
 async def check_trenitalia(client):
     """Trenitalia BFF — CSRF-token + gzipped JSON. The most fragile of
     the scraped endpoints (multi-step auth, fully obfuscated SPA), so
@@ -318,6 +332,7 @@ CHECKS_SCRAPED: list[tuple[str, Callable]] = [
     ("po-larne-cairnryan",     check_po_larne_cairnryan),
     ("po-hull-rotterdam",      check_po_hull_rotterdam),
     ("irish-ferries-sidecar",  check_irish_ferries),
+    ("ryanair-sidecar",        check_ryanair),
     ("trenitalia-bff",         check_trenitalia),
 ]
 

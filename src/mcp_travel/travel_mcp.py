@@ -27,6 +27,7 @@ from mcp_travel.travel_affiliations import VALID_TAGS, filter_by as affiliations
 from mcp_travel.travel_cache import cache_get, cache_set
 from mcp_travel.travel_drive import DriveError, drive_time as drive_route
 from mcp_travel.travel_duffel import DuffelError, search_offers
+from mcp_travel.travel_ryanair import RyanairError, get_flights as ryanair_search
 from mcp_travel.travel_eurostar import (
     EurostarError,
     check as eurostar_scrape,
@@ -158,6 +159,71 @@ async def _flight_impl(
         }
 
     await cache_set(ctx["pool"], "flight_check", args, bucket, result, _TTL_FLIGHTS)
+    result["cached"] = False
+    return result
+
+
+async def _ryanair_impl(
+    ctx: dict,
+    origin_iata: str,
+    dest_iata: str,
+    date: str,
+    adults: int,
+    teens: int,
+    children: int,
+    infants: int,
+    include_sold_out: bool,
+) -> dict[str, Any]:
+    origin = origin_iata.upper().strip()
+    dest = dest_iata.upper().strip()
+    args = {
+        "origin": origin, "destination": dest, "date": date,
+        "adults": adults, "teens": teens, "children": children, "infants": infants,
+        "include_sold_out": include_sold_out,
+    }
+    bucket = date_type.fromisoformat(date)
+
+    cached = await cache_get(ctx["pool"], "ryanair_check", args, bucket)
+    if cached is not None:
+        cached["cached"] = True
+        return cached
+
+    try:
+        flights = await ryanair_search(
+            ctx["client"], date, origin, dest,
+            adults=adults, teens=teens, children=children, infants=infants,
+            include_sold_out=include_sold_out,
+        )
+    except RyanairError as e:
+        return {
+            "ok": False,
+            "mode": "flight",
+            "carrier": "Ryanair",
+            "error": str(e),
+            "origin": origin,
+            "destination": dest,
+            "date": date,
+        }
+
+    available = [f["best_price"] for f in flights if f.get("best_price") is not None]
+    result: dict[str, Any] = {
+        "ok": True,
+        "mode": "flight",
+        "carrier": "Ryanair",
+        "origin": origin,
+        "destination": dest,
+        "date": date,
+        "passengers": {"adults": adults, "teens": teens, "children": children, "infants": infants},
+        "currency": flights[0]["currency"] if flights else None,
+        "flight_count": len(flights),
+        "best_price": min(available) if available else None,
+        "flights": flights,
+        "data_sources": ["ryanair-live"],
+        "note": "Ryanair prices are totals for all passengers combined, not per-person.",
+    }
+
+    # Live availability shifts hour-to-hour; cache 6h same as Duffel.
+    await cache_set(ctx["pool"], "ryanair_check", args, bucket, result, _TTL_FLIGHTS)
     result["cached"] = False
     return result
 
@@ -365,6 +431,54 @@ async def travel_flight_check(
             _ctx(), origin_iata, dest_iata, date, cabin, adults,
             prefer_carriers=prefer_carriers,
             exclude_carriers=exclude_carriers,
+        ),
+        indent=2,
+    )
+
+
+@mcp.tool()
+async def travel_ryanair_check(
+    origin_iata: str,
+    dest_iata: str,
+    date: str,
+    adults: int = 1,
+    teens: int = 0,
+    children: int = 0,
+    infants: int = 0,
+    include_sold_out: bool = False,
+) -> str:
+    """Find Ryanair flights between two airports on a date.
+
+    Ryanair is the canonical hole in Duffel's inventory — `travel_flight_check`
+    will never surface FR flights. Use this tool to fill the gap when a
+    Ryanair-served route is in scope (typically intra-EU + UK↔Ireland +
+    UK↔Spain/Portugal/Italy).
+
+    Args:
+        origin_iata: IATA code of origin airport (e.g. 'DUB', 'STN', 'BCN').
+        dest_iata: IATA code of destination airport.
+        date: Departure date in ISO format (YYYY-MM-DD).
+        adults: Number of adult passengers (16+, default 1).
+        teens: Number of teen passengers (12-15, default 0).
+        children: Number of child passengers (2-11, default 0).
+        infants: Number of infant passengers (under 2, on lap, default 0).
+        include_sold_out: Include flights with no available fares (default False).
+
+    Returns up to N flights for the requested date with per-flight times,
+    duration, fare tiers ('Standard', 'Business', 'Corporate' where offered),
+    seats remaining (when exposed), and total prices.
+
+    NOTE: Prices are totals for ALL passengers combined, not per-person —
+    matches Ryanair's website behaviour. Currency is EUR for most routes,
+    GBP for some UK-origin routes.
+
+    Live data (Playwright sidecar). Per-call latency 10-20s on a cache
+    miss; results cached 6h.
+    """
+    return json.dumps(
+        await _ryanair_impl(
+            _ctx(), origin_iata, dest_iata, date,
+            adults, teens, children, infants, include_sold_out,
         ),
         indent=2,
     )

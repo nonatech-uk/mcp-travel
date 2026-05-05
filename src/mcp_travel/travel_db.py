@@ -50,14 +50,15 @@ async def find_station(
     client: httpx.AsyncClient, query: str, limit: int = 5,
 ) -> list[dict[str, Any]]:
     """Return up to `limit` DB station matches via db-rest /locations.
-    Stop-typed entries surface first; addresses/POIs trail."""
+    Hubs (`station` type — e.g. 'Hamburg Hbf') surface first; platform
+    clusters (`stop` type — e.g. 'Hamburg Hbf (Kirchenallee)' bus annex)
+    next; addresses / POIs trail."""
     items = await _locations(client, query, max(limit, 5))
     if not items:
         return []
-    stops = [it for it in items if it.get("type") == "stop"]
-    others = [it for it in items if it.get("type") != "stop"]
+    items_sorted = sorted(items, key=lambda it: _type_rank(it.get("type")))
     out: list[dict[str, Any]] = []
-    for it in (stops + others)[:limit]:
+    for it in items_sorted[:limit]:
         loc = it.get("location") or {}
         out.append({
             "id": it.get("id"),
@@ -69,13 +70,54 @@ async def find_station(
     return out
 
 
+def _without_paren(name: str) -> str:
+    """'Hamburg Hbf (Kirchenallee)' → 'hamburg hbf'."""
+    i = name.find("(")
+    return (name[:i].rstrip() if i > 0 else name).lower()
+
+
+# Type preference for DB station resolution. db-rest distinguishes
+# 'station' (a hub like 'Hamburg Hbf' id 8002549) from 'stop' (individual
+# platform clusters like 'Hamburg Hbf (Kirchenallee)' id 8071065 — the
+# bus annex). The hub is what callers usually mean. Without this preference
+# 'Hamburg Hbf' would resolve to Kirchenallee and journeys end with an
+# 8-min walk to the bus terminal.
+_TYPE_RANK = {"station": 0, "stop": 1}
+
+
+def _type_rank(t: str | None) -> int:
+    return _TYPE_RANK.get(t or "", 99)
+
+
 async def resolve_station(client: httpx.AsyncClient, query: str) -> dict[str, Any] | None:
-    """Returns top /locations match (preferring 'stop' type) or None."""
+    """Returns the best /locations match. Preference (in order):
+      1. exact case-insensitive name match (any type)
+      2. bare-name match — strip parenthetical suffix, then exact
+         (so 'Berlin Hbf' resolves cleanly even when only
+         'Berlin Hbf (S+U)' is indexed)
+      3. lowest type rank: 'station' (hub) > 'stop' (platform cluster)
+         > anything else
+      4. the first result (last resort — covers POI-typed queries)
+    """
     items = await _locations(client, query, 5)
     if not items:
         return None
-    stops = [it for it in items if it.get("type") == "stop"]
-    pick = stops[0] if stops else items[0]
+    q = query.strip().lower()
+
+    # Tier 1: exact name match
+    for it in items:
+        if (it.get("name") or "").strip().lower() == q:
+            pick = it
+            break
+    else:
+        # Tier 2: bare-name match (paren suffix stripped)
+        for it in items:
+            if _without_paren(it.get("name") or "") == q:
+                pick = it
+                break
+        else:
+            # Tier 3: lowest-ranked type
+            pick = sorted(items, key=lambda it: _type_rank(it.get("type")))[0]
     return {"id": pick.get("id"), "name": pick.get("name"), "type": pick.get("type")}
 
 

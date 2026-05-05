@@ -632,7 +632,8 @@ async def _compose_cross_london(
                     "headcode": out_sm.get("trainReportingIdentity") or "",
                 },
             })
-    candidates.sort(key=lambda j: j["total_min"])
+    # Chronological by departure; faster wins ties.
+    candidates.sort(key=lambda j: (j["depart"], j["total_min"]))
     return candidates[:max_journeys]
 
 
@@ -989,7 +990,9 @@ async def uk_journey(
                     from_crs, from_name, to_crs, to_name, time_from,
                     max_journeys=max_journeys, client=tfl_client,
                 ))
-        composed.sort(key=lambda j: j["total_min"])
+        # Sort by departure time so the list reads chronologically;
+        # break ties on total trip length (faster wins).
+        composed.sort(key=lambda j: (j["depart"], j["total_min"]))
         composed = composed[:max_journeys]
 
         if composed:

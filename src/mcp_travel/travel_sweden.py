@@ -195,9 +195,22 @@ def _summarise_leg(leg: dict) -> dict:
     }
 
 
+def _is_internal_change(leg: dict) -> bool:
+    """HAFAS internal platform-change marker — same-station zero-duration
+    walking leg. Noise; filter out."""
+    if not leg.get("is_walking"):
+        return False
+    if leg.get("from") and leg.get("to") and leg["from"] == leg["to"]:
+        return True
+    if leg.get("depart") and leg.get("arrive") and leg["depart"] == leg["arrive"]:
+        return True
+    return False
+
+
 def _summarise_trip(t: dict) -> dict:
     legs = _ensure_list((t.get("LegList") or {}).get("Leg"))
     summarised = [_summarise_leg(l) for l in legs]
+    summarised = [l for l in summarised if not _is_internal_change(l)]
     pt_legs = [l for l in summarised if not l.get("is_walking")]
     o = t.get("Origin") or {}
     d = t.get("Destination") or {}

@@ -190,8 +190,22 @@ def _summarise_leg(leg: dict) -> dict:
     }
 
 
+def _is_internal_change(leg: dict) -> bool:
+    """HAFAS planners emit zero-duration walking 'legs' at the same
+    station to represent internal platform changes — filter them out
+    (next leg's from_platform conveys the same info)."""
+    if not leg.get("is_walking"):
+        return False
+    if leg.get("from") and leg.get("to") and leg["from"] == leg["to"]:
+        return True
+    if leg.get("depart") and leg.get("arrive") and leg["depart"] == leg["arrive"]:
+        return True
+    return False
+
+
 def _summarise_trip(trip: dict) -> dict:
     legs = [_summarise_leg(l) for l in (trip.get("legs") or [])]
+    legs = [l for l in legs if not _is_internal_change(l)]
     return {
         "duration_minutes": trip.get("plannedDurationInMinutes"),
         "actual_duration_minutes": trip.get("actualDurationInMinutes"),

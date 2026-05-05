@@ -235,13 +235,26 @@ def _summarise_pattern(p: dict) -> dict:
             "distance_m": l.get("distance"),
         }
 
+    shaped = [_shape(l) for l in legs]
+    # Drop foot-mode legs at the same place / zero distance — Entur
+    # emits them between estimated calls at the same stop, equivalent
+    # to HAFAS's internal platform changes elsewhere.
+    shaped = [
+        l for l in shaped
+        if not (l.get("is_walking") and (
+            (l.get("from") and l.get("from") == l.get("to"))
+            or l.get("depart") == l.get("arrive")
+            or (l.get("distance_m") is not None and l["distance_m"] == 0)
+        ))
+    ]
+
     return {
         "depart": p.get("expectedStartTime"),
         "arrive": p.get("expectedEndTime"),
         "duration_seconds": p.get("duration") or 0,
         "duration_minutes": (p.get("duration") or 0) // 60,
         "transfers": max(len(pt_legs) - 1, 0),
-        "legs": [_shape(l) for l in legs],
+        "legs": shaped,
     }
 
 

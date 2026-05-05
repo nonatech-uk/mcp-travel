@@ -162,8 +162,23 @@ async def stationboard(
     }
 
 
+def _is_internal_change(leg: dict) -> bool:
+    """HAFAS planners (db-rest, NS, SBB) emit zero-duration walking
+    'legs' at the same station to represent internal platform changes
+    (Brussels-Nord → Brussels-Nord). They're noise — the next leg's
+    from_platform already conveys the platform change. Filter them out."""
+    if not leg.get("is_walking"):
+        return False
+    if leg.get("from") and leg.get("to") and leg["from"] == leg["to"]:
+        return True
+    if leg.get("depart") and leg.get("arrive") and leg["depart"] == leg["arrive"]:
+        return True
+    return False
+
+
 def _summarise_journey(j: dict) -> dict:
     legs = [_summarise_leg(l) for l in (j.get("legs") or [])]
+    legs = [l for l in legs if not _is_internal_change(l)]
     pt_legs = [l for l in legs if not l.get("is_walking")]
     if pt_legs:
         depart = pt_legs[0]["depart"]

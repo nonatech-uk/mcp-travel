@@ -146,6 +146,48 @@ audited.)
   `plan_trip`, `plan_multi_leg`) can call them as plain async functions
   without going through the MCP serialisation round-trip.
 
+### Multi-source aggregator contract
+
+Tools that fan out to two or more sources for the **same** conceptual
+operation (e.g. `travel_ferry_check` querying DFDS + Brittany + Stena
++ P&O + Irish Ferries; `travel_flight_check` querying Duffel + Ryanair)
+return this envelope:
+
+```json
+{
+  "ok": true,                          // at least one source returned data
+  "mode": "ferry" | "flight" | ...,
+  "data_sources": ["dfds-live", ...],  // sources that contributed
+  "options": [
+    {
+      "source": "dfds",                // or "operator": "DFDS"
+      "live_data": true,
+      "data_sources": ["dfds-live"],
+      "live_error": null,              // string when this source failed
+      ...source-specific payload...
+    }
+  ],
+  "as_of": "2026-05-05T..."
+}
+```
+
+Top-level `ok` means "we got *something* useful from at least one
+source"; per-source failures surface as `live_error` strings inside
+their own option block, so a single dead scraper never kills the
+whole call. Reference implementations: `travel_ferries.check()`
+(`src/mcp_travel/travel_ferries.py`) and `_flight_check_impl`
+(`src/mcp_travel/travel_mcp.py`).
+
+This contract applies only to multi-source aggregators. Single-source
+tools (per-operator rail, per-operator scrapers) keep the simpler
+`{ok: bool, error?: str, ...payload}` shape; cross-mode orchestrators
+(`travel_compare_modes`, `travel_plan_trip`) keep their dict-of-modes
+shape because each mode is uniquely named and known to the caller.
+
+Prices in option blocks should also carry `best_price_gbp` alongside
+the native `best_price` + `currency` so callers can rank cross-source
+without doing FX themselves — see `travel_fx.to_gbp`.
+
 ## Development
 
 The codebase relies only on `fastmcp`, `httpx`, and `asyncpg` at runtime.

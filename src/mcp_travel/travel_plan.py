@@ -48,6 +48,7 @@ from mcp_travel.travel_rank import (
     classify_region,
     confidence,
     filter_modes_by_origin,
+    pick_airport_by_country,
     score,
 )
 
@@ -359,30 +360,42 @@ async def build_flight(
     prefer_carriers: list[str] | None = None,
     exclude_carriers: list[str] | None = None,
     origin_region: str = "uk",
+    origin_country: str | None = None,
+    dest_country: str | None = None,
 ) -> dict[str, Any]:
     airports = REGION_AIRPORTS.get(region) or {"origin": ["LGW"], "destination": ["CDG"]}
-    if origin_region != "uk":
-        # build_flight currently assumes UK origin airports (LGW/LHR). Picking
-        # one for a non-UK origin would route the user via London — wrong
-        # answer. Stage 5b will geocode the origin and pick a nearby airport;
-        # until then surface a clean error pointing at the per-mode tools.
-        return {
-            "ok": False,
-            "mode": "flight",
-            "error": (
-                f"plan_trip's flight composer assumes a UK origin. For non-UK "
-                f"origins ({origin_region!r}), use travel_flight_check + the "
-                f"appropriate travel_rail_<iso>_journey directly until Stage 5b "
-                f"cross-EU multi-leg composition lands."
-            ),
-        }
-    origin_iata = airports["origin"][0]
+
+    # Origin airport: UK origin uses REGION_AIRPORTS; non-UK origin picks
+    # by country, with the origin string as a city hint (so 'Zermatt'
+    # → ZRH via the Switzerland country list).
+    if origin_region == "uk":
+        origin_iata = airports["origin"][0]
+    else:
+        origin_iata = pick_airport_by_country(origin_country, hint_text=origin)
+        if not origin_iata:
+            return {
+                "ok": False, "mode": "flight",
+                "error": f"no airport mapping for origin country {origin_country!r}",
+            }
+
+    # Destination airport: explicit override > alps_geneva fast path
+    # > REGION_AIRPORTS (UK-curated regions) > country lookup with
+    # dest display_name as hint (so 'Tromso' → TOS via the Norway list).
     if dest_iata_override:
         dest_iata = dest_iata_override
     elif alps_geneva:
         dest_iata = "GVA"
+    elif region in REGION_AIRPORTS:
+        dest_iata = REGION_AIRPORTS[region]["destination"][0]
     else:
-        dest_iata = airports["destination"][0]
+        dest_iata = pick_airport_by_country(
+            dest_country, hint_text=dest.get("display_name") or dest.get("query"),
+        )
+        if not dest_iata:
+            return {
+                "ok": False, "mode": "flight",
+                "error": f"no airport mapping for destination country {dest_country!r}",
+            }
 
     # Drive home → origin airport
     drive_to_apt = await _drive_or_fallback(
@@ -1273,7 +1286,18 @@ async def plan_trip_impl(
     depart_dt = datetime.fromisoformat(f"{depart_date}T{depart_time}:00").replace(tzinfo=timezone.utc)
     # Resolve flight destination airports — explicit override > region default
     region_aps = REGION_AIRPORTS.get(region) or {"origin": ["LGW"], "destination": ["CDG"]}
-    flight_dests = dest_airports or region_aps.get("destination", ["CDG"])
+    if dest_airports:
+        flight_dests = dest_airports
+    elif region in REGION_AIRPORTS:
+        flight_dests = region_aps["destination"]
+    else:
+        # Region isn't in REGION_AIRPORTS — pick by destination country
+        # with the destination string as a city hint (so Tromso → TOS,
+        # not just Norway-default-OSL).
+        picked = pick_airport_by_country(
+            geo.get("country_code"), hint_text=geo.get("display_name") or destination,
+        )
+        flight_dests = [picked] if picked else []
 
     tasks = []
     for m in modes:
@@ -1291,14 +1315,18 @@ async def plan_trip_impl(
                                            dest_iata_override=ap,
                                            prefer_carriers=prefer_carriers,
                                            exclude_carriers=exclude_carriers,
-                                           origin_region=origin_region)))
+                                           origin_region=origin_region,
+                                           origin_country=(origin_geo or {}).get("country_code"),
+                                           dest_country=geo.get("country_code"))))
         elif m == "fly_geneva_drive":
             tasks.append(("fly_geneva_drive",
                           build_flight(ctx, region, geo, depart_dt, alps_geneva=True,
                                        origin=origin, origin_label=origin_label,
                                        prefer_carriers=prefer_carriers,
                                        exclude_carriers=exclude_carriers,
-                                       origin_region=origin_region)))
+                                       origin_region=origin_region,
+                                       origin_country=(origin_geo or {}).get("country_code"),
+                                       dest_country=geo.get("country_code"))))
         elif m == "north_sea_ferry":
             tasks.append(("north_sea_ferry",
                           build_north_sea_ferry(ctx, geo, depart_dt,

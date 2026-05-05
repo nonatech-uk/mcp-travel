@@ -250,6 +250,102 @@ ORIGIN_GATED_MODES: dict[str, set[str]] = {
 }
 
 
+# --- Stage 5b: country / city → airport selection ---------------------
+# REGION_AIRPORTS above is keyed by destination region from a UK origin
+# (covers UK→FR, UK→CH, etc). For non-UK origins or non-UK destinations
+# outside the curated regions, fall back to a country-level hub list +
+# a small city → IATA override map for known regional airports.
+
+AIRPORTS_BY_COUNTRY: dict[str, list[str]] = {
+    # Western Europe
+    "GB": ["LHR", "LGW", "STN", "MAN", "EDI", "GLA"],
+    "IE": ["DUB", "ORK", "SNN"],
+    "FR": ["CDG", "ORY", "LYS", "MRS", "TLS", "BOD", "NTE", "NCE"],
+    "BE": ["BRU", "CRL"],
+    "NL": ["AMS", "EIN"],
+    "LU": ["LUX"],
+    "DE": ["FRA", "MUC", "BER", "DUS", "HAM", "STR"],
+    "CH": ["ZRH", "GVA", "BSL"],
+    "AT": ["VIE", "SZG", "INN"],
+    "IT": ["FCO", "MXP", "BLQ", "VCE", "NAP"],
+    "ES": ["MAD", "BCN", "AGP", "PMI", "VLC", "SVQ"],
+    "PT": ["LIS", "OPO", "FAO"],
+    # Nordic
+    "NO": ["OSL", "BGO", "TRD", "TOS", "SVG"],
+    "SE": ["ARN", "GOT", "MMX"],
+    "DK": ["CPH", "BLL"],
+    "FI": ["HEL", "TKU"],
+    "IS": ["KEF"],
+    # Eastern + South-east
+    "PL": ["WAW", "KRK", "GDN"],
+    "CZ": ["PRG"],
+    "HU": ["BUD"],
+    "GR": ["ATH", "SKG"],
+    "RO": ["OTP"],
+    "BG": ["SOF"],
+    "HR": ["ZAG", "SPU", "DBV"],
+    "SI": ["LJU"],
+    "SK": ["BTS"],
+    # Outside Europe (long-haul fallbacks)
+    "US": ["JFK", "LAX", "ORD"],
+    "AR": ["EZE"],
+}
+
+# City-name (lowercase substring) → IATA. Used to narrow the country
+# list to the actual regional airport. Only well-known/named airports
+# go here — generic searches fall back to AIRPORTS_BY_COUNTRY[0].
+CITY_TO_IATA: dict[str, str] = {
+    # Norway
+    "tromso": "TOS", "tromsø": "TOS", "bergen": "BGO",
+    "trondheim": "TRD", "stavanger": "SVG", "oslo": "OSL",
+    # Sweden
+    "stockholm": "ARN", "gothenburg": "GOT", "göteborg": "GOT",
+    "malmo": "MMX", "malmö": "MMX",
+    # Other Nordic
+    "copenhagen": "CPH", "helsinki": "HEL", "reykjavik": "KEF",
+    # Western
+    "zurich": "ZRH", "zürich": "ZRH", "geneva": "GVA", "basel": "BSL",
+    "munich": "MUC", "frankfurt": "FRA", "berlin": "BER",
+    "hamburg": "HAM", "düsseldorf": "DUS", "dusseldorf": "DUS",
+    "amsterdam": "AMS", "brussels": "BRU", "luxembourg": "LUX",
+    "paris": "CDG", "lyon": "LYS", "marseille": "MRS",
+    "toulouse": "TLS", "nice": "NCE", "bordeaux": "BOD", "nantes": "NTE",
+    "vienna": "VIE", "salzburg": "SZG", "innsbruck": "INN",
+    "milan": "MXP", "rome": "FCO", "venice": "VCE",
+    "naples": "NAP", "bologna": "BLQ", "florence": "FLR",
+    "barcelona": "BCN", "madrid": "MAD", "malaga": "AGP",
+    "palma": "PMI", "valencia": "VLC", "seville": "SVQ",
+    "lisbon": "LIS", "porto": "OPO", "faro": "FAO",
+    # Eastern
+    "warsaw": "WAW", "krakow": "KRK", "kraków": "KRK",
+    "prague": "PRG", "budapest": "BUD", "athens": "ATH",
+    "thessaloniki": "SKG", "bucharest": "OTP", "sofia": "SOF",
+    "zagreb": "ZAG", "split": "SPU", "dubrovnik": "DBV",
+    # UK / Ireland
+    "dublin": "DUB", "cork": "ORK", "london": "LHR",
+    "manchester": "MAN", "edinburgh": "EDI", "glasgow": "GLA",
+}
+
+
+def pick_airport_by_country(
+    country_code: str | None, hint_text: str | None = None,
+) -> str | None:
+    """Pick an airport IATA for a country, optionally narrowed by a
+    city-name hint (origin string, destination display name, etc).
+    Returns the best guess or None if no mapping exists.
+    """
+    if hint_text:
+        h = hint_text.strip().lower()
+        for city, iata in CITY_TO_IATA.items():
+            if city in h:
+                return iata
+    if country_code:
+        airports = AIRPORTS_BY_COUNTRY.get(country_code.upper())
+        if airports:
+            return airports[0]
+    return None
+
+
 def filter_modes_by_origin(modes: list[str], origin_region: str) -> list[str]:
     """Drop modes that don't make sense from this origin region.
 

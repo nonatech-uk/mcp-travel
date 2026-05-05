@@ -188,6 +188,43 @@ Prices in option blocks should also carry `best_price_gbp` alongside
 the native `best_price` + `currency` so callers can rank cross-source
 without doing FX themselves — see `travel_fx.to_gbp`.
 
+### Passenger spec & age cutoffs
+
+Tools that take passenger counts accept either a flat `adults: int`
+(legacy) or a `passengers: dict` of the form
+`{adults, teens, children, infants}` (preferred). Per-operator
+interpretation of the bands varies — the tool wrapper does the
+right thing for each backend, but if you're constructing requests
+manually it helps to know the cutoffs:
+
+| Operator         | Adult | Teen / Youth | Child       | Infant         |
+| ---------------- | ----- | ------------ | ----------- | -------------- |
+| Eurostar         | 12+   | (folded into adult) | 4-11        | under 4 (lap)  |
+| Duffel (default) | 18+   | (folded into adult) | 2-17        | under 2 (lap)  |
+| Ryanair          | 16+   | 12-15        | 2-11        | under 2 (lap)  |
+| Brittany Ferries | 14+   | (folded into adult) | 4-13        | under 4 (free) |
+| Stena Line       | 16+   | (folded into adult) | 4-15        | under 4 (free) |
+| DFDS             | 16+   | (folded into adult) | 4-15        | under 4 (free) |
+| P&O Ferries      | 18+   | (folded into adult) | 4-17        | under 4 (free) |
+| Irish Ferries    | 16+   | (folded into adult) | 3-15        | under 3 (free) |
+| Trenitalia       | 15+   | (folded into adult) | 4-14        | under 4 (free) |
+| SBB / DB / NS / Entur / SNCB / SNCF / ResRobot | n/a — journey-only, no pricing in API |||
+
+For tools whose underlying API doesn't distinguish bands (most rail
+journey planners; ferry top-level headcount), the wrapper sums the
+dict to a total. For band-aware tools (Eurostar, Ryanair) per-band
+counts are passed through. Eurostar treats teens as adults inside
+the wrapper.
+
+### Datetime spec
+
+Rail journey tools (`travel_rail_<iso>_journey`) historically took
+`datetime_iso` (full ISO datetime). They now also accept `date`
+(YYYY-MM-DD) + `depart_time` (HH:MM, default `08:00`) as an
+alternative. `datetime_iso` wins if both are given. Other tools
+(flight, ferry, eurotunnel, eurostar) keep the simpler `date`
+shape — they query a whole day and don't need a departure time.
+
 ## Development
 
 The codebase relies only on `fastmcp`, `httpx`, and `asyncpg` at runtime.

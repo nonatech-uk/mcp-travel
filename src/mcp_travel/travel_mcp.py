@@ -137,6 +137,51 @@ def _ctx():
     return get_context().lifespan_context
 
 
+# --- Stage 5c param-harmonisation helpers ------------------------------
+# Tools historically accepted either `datetime_iso` (rail journey tools)
+# or `date` + `depart_time` (flight/ferry/eurotunnel) for the time
+# argument, and either flat `adults` int or band-separated
+# `adults`/`teens`/`children`/`infants` for passenger count. These
+# helpers let every tool accept both shapes so the LLM doesn't have
+# to remember which convention each tool uses.
+
+def _resolve_datetime(
+    datetime_iso: str | None,
+    date: str | None,
+    depart_time: str = "08:00",
+) -> str | None:
+    """Return an ISO datetime string. Prefers explicit datetime_iso;
+    falls back to date + depart_time. Returns None if neither given —
+    caller decides whether to error or default to 'now'."""
+    if datetime_iso:
+        return datetime_iso
+    if date:
+        return f"{date}T{depart_time}:00"
+    return None
+
+
+def _resolve_passengers(
+    passengers: dict | None,
+    *,
+    adults: int = 0,
+    teens: int = 0,
+    children: int = 0,
+    infants: int = 0,
+) -> dict[str, int]:
+    """Resolve a passenger spec from either the new `passengers` dict
+    shape (preferred) or the legacy band ints. Returns a normalised
+    dict with all four bands set. Note: per-operator interpretation
+    of these bands varies — see README age-cutoffs section."""
+    if passengers is not None:
+        return {
+            "adults": int(passengers.get("adults", adults) or 0),
+            "teens": int(passengers.get("teens", teens) or 0),
+            "children": int(passengers.get("children", children) or 0),
+            "infants": int(passengers.get("infants", infants) or 0),
+        }
+    return {"adults": adults, "teens": teens, "children": children, "infants": infants}
+
+
 # --- Per-tool impl helpers (return dicts; tool wrappers json.dumps) ---
 
 
@@ -677,7 +722,9 @@ async def travel_ryanair_check(
 async def travel_rail_fr_journey(
     origin: str,
     destination: str,
-    datetime_iso: str,
+    datetime_iso: str | None = None,
+    date: str | None = None,
+    depart_time: str = "08:00",
     is_arrival: bool = False,
     max_journeys: int = 5,
 ) -> str:
@@ -686,9 +733,15 @@ async def travel_rail_fr_journey(
     Inputs accept free-text place names ('Paris Gare de Lyon'), Navitia IDs
     ('stop_area:SNCF:87686006'), or 'lat;lon' coords. Live pricing is **not**
     in the SNCF API — `booking_deeplink` jumps to sncf-connect.com.
+
+    Pass either `datetime_iso` (full ISO datetime) OR `date` + `depart_time`
+    (YYYY-MM-DD + HH:MM); datetime_iso wins if both given.
     """
+    dt = _resolve_datetime(datetime_iso, date, depart_time)
+    if not dt:
+        return json.dumps({"ok": False, "error": "must provide datetime_iso or date"}, indent=2)
     return json.dumps(
-        await _sncf_impl(_ctx(), origin, destination, datetime_iso, is_arrival, max_journeys),
+        await _sncf_impl(_ctx(), origin, destination, dt, is_arrival, max_journeys),
         indent=2,
     )
 
@@ -697,7 +750,9 @@ async def travel_rail_fr_journey(
 async def travel_rail_nl_journey(
     origin: str,
     destination: str,
-    datetime_iso: str,
+    datetime_iso: str | None = None,
+    date: str | None = None,
+    depart_time: str = "08:00",
     is_arrival: bool = False,
     max_journeys: int = 5,
 ) -> str:
@@ -707,26 +762,24 @@ async def travel_rail_nl_journey(
     after first call). Accepts station codes ('ASD','RTD','UT'), exact
     names ('Amsterdam Centraal','Utrecht Centraal'), or substrings.
 
-    Args:
-        origin: Free-text Dutch station name or code.
-        destination: Same.
-        datetime_iso: ISO datetime with timezone offset
-            ('2026-06-15T09:00:00+02:00') or naive ISO.
-        is_arrival: If True, datetime_iso is the arrive-by target.
-        max_journeys: Cap on returned options.
+    Pass either `datetime_iso` (full ISO datetime) OR `date` + `depart_time`
+    (YYYY-MM-DD + HH:MM); datetime_iso wins if both given.
 
     Each journey carries planned + actual durations, transfers, crowd
     forecast, and per-leg details (operator, train number, platforms).
     """
+    dt = _resolve_datetime(datetime_iso, date, depart_time)
+    if not dt:
+        return json.dumps({"ok": False, "error": "must provide datetime_iso or date"}, indent=2)
     try:
         result = await ns_search(
-            _ctx()["client"], origin, destination, datetime_iso,
+            _ctx()["client"], origin, destination, dt,
             is_arrival=is_arrival, max_journeys=max_journeys,
         )
     except NSError as e:
         return json.dumps({"ok": False, "mode": "rail", "country": "NL",
                            "error": str(e), "origin": origin,
-                           "destination": destination, "datetime": datetime_iso}, indent=2)
+                           "destination": destination, "datetime": dt}, indent=2)
     return json.dumps(result, indent=2)
 
 
@@ -734,7 +787,9 @@ async def travel_rail_nl_journey(
 async def travel_rail_be_journey(
     origin: str,
     destination: str,
-    datetime_iso: str,
+    datetime_iso: str | None = None,
+    date: str | None = None,
+    depart_time: str = "08:00",
     is_arrival: bool = False,
     max_journeys: int = 5,
 ) -> str:
@@ -745,26 +800,24 @@ async def travel_rail_be_journey(
     'Liège-Guillemins') but accepts substrings of either standard or
     local names.
 
-    Args:
-        origin: Free-text Belgian station name.
-        destination: Same.
-        datetime_iso: ISO datetime; date+time used (timezone ignored —
-            iRail assumes Belgium local).
-        is_arrival: If True, datetime_iso is the arrive-by target
-            (iRail timeSel=arrival).
-        max_journeys: Cap on returned options.
+    Pass either `datetime_iso` (full ISO datetime — timezone ignored,
+    iRail assumes Belgium local) OR `date` + `depart_time` (YYYY-MM-DD
+    + HH:MM); datetime_iso wins if both given.
 
     No auth needed. Live data from SNCB / NMBS scraped by iRail.
     """
+    dt = _resolve_datetime(datetime_iso, date, depart_time)
+    if not dt:
+        return json.dumps({"ok": False, "error": "must provide datetime_iso or date"}, indent=2)
     try:
         result = await sncb_search(
-            _ctx()["client"], origin, destination, datetime_iso,
+            _ctx()["client"], origin, destination, dt,
             is_arrival=is_arrival, max_journeys=max_journeys,
         )
     except SNCBError as e:
         return json.dumps({"ok": False, "mode": "rail", "country": "BE",
                            "error": str(e), "origin": origin,
-                           "destination": destination, "datetime": datetime_iso}, indent=2)
+                           "destination": destination, "datetime": dt}, indent=2)
     return json.dumps(result, indent=2)
 
 
@@ -772,7 +825,9 @@ async def travel_rail_be_journey(
 async def travel_rail_de_journey(
     origin: str,
     destination: str,
-    datetime_iso: str,
+    datetime_iso: str | None = None,
+    date: str | None = None,
+    depart_time: str = "08:00",
     is_arrival: bool = False,
     max_journeys: int = 5,
 ) -> str:
@@ -782,27 +837,26 @@ async def travel_rail_de_journey(
     (handles 'Köln Hbf', 'München Hauptbahnhof', 'Frankfurt(Main)Hbf'
     transparently — preferring 'stop' type results).
 
-    Args:
-        origin: Free-text German (or cross-border) station name.
-        destination: Same.
-        datetime_iso: ISO datetime with timezone offset preferred.
-        is_arrival: If True, datetime_iso is the arrive-by target
-            (db-rest `arrival` param).
-        max_journeys: Cap on returned options.
+    Pass either `datetime_iso` (full ISO datetime, offset preferred) OR
+    `date` + `depart_time` (YYYY-MM-DD + HH:MM); datetime_iso wins
+    if both given.
 
     No auth. db-rest (v6.db.transport.rest) is a community service;
     occasionally has downtime. We fail-soft. To self-host, set
     DB_REST_BASE env var to your own instance.
     """
+    dt = _resolve_datetime(datetime_iso, date, depart_time)
+    if not dt:
+        return json.dumps({"ok": False, "error": "must provide datetime_iso or date"}, indent=2)
     try:
         result = await db_search(
-            _ctx()["client"], origin, destination, datetime_iso,
+            _ctx()["client"], origin, destination, dt,
             is_arrival=is_arrival, max_journeys=max_journeys,
         )
     except DBError as e:
         return json.dumps({"ok": False, "mode": "rail", "country": "DE",
                            "error": str(e), "origin": origin,
-                           "destination": destination, "datetime": datetime_iso}, indent=2)
+                           "destination": destination, "datetime": dt}, indent=2)
     return json.dumps(result, indent=2)
 
 
@@ -1052,7 +1106,9 @@ async def travel_rail_at_journey(
 async def travel_rail_no_journey(
     origin: str,
     destination: str,
-    datetime_iso: str,
+    datetime_iso: str | None = None,
+    date: str | None = None,
+    depart_time: str = "08:00",
     is_arrival: bool = False,
     max_journeys: int = 5,
 ) -> str:
@@ -1063,13 +1119,9 @@ async def travel_rail_no_journey(
     other Norwegian operators. Free-text origin/destination resolved via
     Entur's geocoder.
 
-    Args:
-        origin: Free-text Norwegian station ('Oslo S', 'Bergen', 'Trondheim').
-        destination: Same.
-        datetime_iso: ISO datetime ('2026-06-15T08:00:00').
-        is_arrival: If True, datetime_iso is the arrive-by target
-            (Entur GraphQL `arriveBy: true`).
-        max_journeys: Cap on returned options (default 5).
+    Pass either `datetime_iso` (full ISO datetime, e.g. '2026-06-15T08:00:00')
+    OR `date` + `depart_time` (YYYY-MM-DD + HH:MM); datetime_iso wins if
+    both given.
 
     Live timetable + line/operator info per leg. The best European rail
     API we have access to — wish all countries did it like this.
@@ -1082,15 +1134,18 @@ async def travel_rail_no_journey(
     naturally in mixed rail+ferry trips (Bergen→Stavanger via Mortavika
     crossing, Bodø→Moskenes Lofoten, etc.).
     """
+    dt = _resolve_datetime(datetime_iso, date, depart_time)
+    if not dt:
+        return json.dumps({"ok": False, "error": "must provide datetime_iso or date"}, indent=2)
     try:
         result = await norway_search(
-            _ctx()["client"], origin, destination, datetime_iso,
+            _ctx()["client"], origin, destination, dt,
             is_arrival=is_arrival, max_journeys=max_journeys,
         )
     except NorwayError as e:
         return json.dumps({"ok": False, "mode": "rail", "country": "NO",
                            "error": str(e), "origin": origin,
-                           "destination": destination, "datetime": datetime_iso}, indent=2)
+                           "destination": destination, "datetime": dt}, indent=2)
     return json.dumps(result, indent=2)
 
 
@@ -1098,7 +1153,9 @@ async def travel_rail_no_journey(
 async def travel_rail_se_journey(
     origin: str,
     destination: str,
-    datetime_iso: str,
+    datetime_iso: str | None = None,
+    date: str | None = None,
+    depart_time: str = "08:00",
     is_arrival: bool = False,
     max_journeys: int = 5,
 ) -> str:
@@ -1109,28 +1166,26 @@ async def travel_rail_se_journey(
     consolidated successor to the older Reseplanerare / Stolptidstabeller
     APIs. Free-text origin/destination resolved via location.name first.
 
-    Args:
-        origin: Free-text Swedish station ('Stockholm Centralstation',
-                'Göteborg', 'Malmö C', 'Kiruna').
-        destination: Same.
-        datetime_iso: ISO datetime ('2026-06-15T08:00:00').
-        is_arrival: If True, datetime_iso is the arrive-by target
-            (ResRobot `searchForArrival=1`).
-        max_journeys: Cap on returned options.
+    Pass either `datetime_iso` (full ISO datetime, e.g. '2026-06-15T08:00:00')
+    OR `date` + `depart_time` (YYYY-MM-DD + HH:MM); datetime_iso wins if
+    both given.
 
     Live HAFAS data — includes train number (e.g. Snabbtåg 429),
     operator, per-leg from/to + tracks. Snabbtåg = SJ's high-speed
     service.
     """
+    dt = _resolve_datetime(datetime_iso, date, depart_time)
+    if not dt:
+        return json.dumps({"ok": False, "error": "must provide datetime_iso or date"}, indent=2)
     try:
         result = await sweden_search(
-            _ctx()["client"], origin, destination, datetime_iso,
+            _ctx()["client"], origin, destination, dt,
             is_arrival=is_arrival, max_journeys=max_journeys,
         )
     except SwedenError as e:
         return json.dumps({"ok": False, "mode": "rail", "country": "SE",
                            "error": str(e), "origin": origin,
-                           "destination": destination, "datetime": datetime_iso}, indent=2)
+                           "destination": destination, "datetime": dt}, indent=2)
     return json.dumps(result, indent=2)
 
 
@@ -1275,11 +1330,14 @@ async def travel_rail_it_status(
 
 @mcp.tool()
 async def travel_eurostar_check(
-    origin_city: str,
-    dest_city: str,
-    date: str,
+    origin_city: str | None = None,
+    dest_city: str | None = None,
+    date: str | None = None,
     adults: int = 2,
     time: str = "10:00",
+    origin: str | None = None,
+    destination: str | None = None,
+    passengers: dict | None = None,
 ) -> str:
     """Live Eurostar timetable + per-class seat availability for a date.
 
@@ -1293,16 +1351,29 @@ async def travel_eurostar_check(
     booking_url goes to the live booking flow with the correct date.
 
     Args:
-        origin_city: 'london' or another known slug.
-        dest_city: target station slug.
+        origin / origin_city: 'london' or another known slug. (Aliases —
+            `origin` is the canonical name; `origin_city` is the legacy
+            alias kept for backward compatibility.)
+        destination / dest_city: target station slug. Same alias rule.
         date: YYYY-MM-DD departure date.
-        adults: Pax count (affects fare-class availability filtering).
+        adults: Pax count. Use `passengers` dict for band-aware spec.
+        passengers: {adults, teens, children, infants} — preferred over
+            the flat `adults` int when a band-aware spec matters.
+            Eurostar interprets bands as: adult 12+, child 4-11, infant
+            under 4 (free, lap-held).
         time: HH:MM target — selected_journey is the train at-or-after.
 
     Live cache TTL 6h, static-table fallback 24h.
     """
+    o = origin or origin_city
+    d = destination or dest_city
+    if not o or not d or not date:
+        return json.dumps({"ok": False, "error": "must provide origin (or origin_city), destination (or dest_city), and date"}, indent=2)
+    pax = _resolve_passengers(passengers, adults=adults)
+    # Eurostar treats teens as adults; children + infants pass through.
+    total_adults = pax["adults"] + pax["teens"]
     return json.dumps(
-        await _eurostar_impl(_ctx(), origin_city, dest_city, date, adults, time=time),
+        await _eurostar_impl(_ctx(), o, d, date, total_adults, time=time),
         indent=2,
     )
 
@@ -2058,7 +2129,7 @@ async def travel_ferry_check(
     dest_port: str,
     date: str,
     vehicle: str = "car",
-    passengers: int = 2,
+    passengers: int | dict = 2,
 ) -> str:
     """Find ferry crossings between two named ports on a date.
 
@@ -2094,12 +2165,21 @@ async def travel_ferry_check(
         vehicle: 'car' (default), 'motorcycle', or 'foot' (DFDS live);
                  'high-vehicle' / 'caravan-trailer' / 'foot-passenger'
                  accepted but treated as 'car' for DFDS price lookup.
-        passengers: Headcount (default 2).
+        passengers: Headcount as a flat int (e.g. `2`) OR a band-aware
+                    dict `{adults, teens, children, infants}` — total
+                    headcount is what the underlying ferry APIs need
+                    today (per-band pricing varies wildly by route and
+                    is exposed via per-tier `prices` in the response).
+                    Default 2.
     """
+    if isinstance(passengers, dict):
+        pax_total = sum(int(v or 0) for v in passengers.values())
+    else:
+        pax_total = int(passengers or 2)
     try:
         result = await ferry_check(
             _ctx()["client"], origin_port=origin_port, dest_port=dest_port,
-            date=date, vehicle=vehicle, passengers=passengers,
+            date=date, vehicle=vehicle, passengers=pax_total,
         )
     except FerryError as e:
         return json.dumps({"ok": False, "mode": "ferry", "error": str(e),

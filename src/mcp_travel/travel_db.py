@@ -11,8 +11,10 @@ Endpoints used:
 Free-text origin/destination is resolved via /locations (chooses the
 top result of type 'stop') before /journeys is hit.
 
-If you ever want a more reliable backend, self-host db-rest in a
-container alongside mcp-travel and point DB_BASE at it.
+For a reliable backend, self-host db-rest in a container alongside
+mcp-travel and set `DB_REST_BASE` (e.g. `http://db-rest:3000` on the
+podman-frontend network). Done on the household NAS — see
+/zfs/Apps/quadlets/db-rest.container.
 """
 
 import os

@@ -219,15 +219,16 @@ def _summarise_section(s: dict) -> dict:
 
 
 def _summarise_journey(j: dict) -> dict:
-    sections = [_summarise_section(s) for s in j.get("sections", [])]
-    pt_only = [s for s in sections if s.get("type") == "public_transport"]
+    legs = [_summarise_section(s) for s in j.get("sections", [])]
+    pt_only = [l for l in legs if l.get("type") == "public_transport"]
     return {
-        "departure": j.get("departure_date_time"),
-        "arrival": j.get("arrival_date_time"),
+        "depart": j.get("departure_date_time"),
+        "arrive": j.get("arrival_date_time"),
         "duration_minutes": (j.get("duration") or 0) // 60,
         "transfers": max(len(pt_only) - 1, 0),
         "co2_grams": (j.get("co2_emission") or {}).get("value"),
-        "sections": sections,
+        "legs": legs,            # canonical name (was 'sections' in Navitia wire format)
+        "sections": legs,         # back-compat alias for any caller that latched onto the old key
     }
 
 
